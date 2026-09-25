@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ЕДЦ · Прогноз пассажиропотока трамваев</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+:root{
+  --bg:#0b0f14; --panel:#111820; --panel2:#151d27; --border:#22303c;
+  --text:#e8eef4; --text-dim:#8ea3b3; --accent:#ff5a1f; --accent2:#00c2ff;
+  --green:#2ecc71; --yellow:#f5c518; --red:#ff4d4f;
+  --mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text); font-family:var(--sans);
+  height:100vh; overflow:hidden; display:flex; flex-direction:column;
+}
+header{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:10px 20px; background:linear-gradient(180deg,#141c24,#0f151b);
+  border-bottom:1px solid var(--border); flex-shrink:0;
+}
+.brand{display:flex; align-items:center; gap:12px}
+.brand-mark{
+  width:34px; height:34px; border-radius:8px;
+  background:var(--accent); display:flex; align-items:center; justify-content:center;
+  font-weight:800; font-size:16px; color:#0b0f14; letter-spacing:-0.5px;
+}
+.brand-text h1{font-size:14px; font-weight:600; letter-spacing:0.3px}
+.brand-text span{font-size:11px; color:var(--text-dim)}
+.status-strip{display:flex; align-items:center; gap:18px; font-family:var(--mono); font-size:11px}
+.status-item{display:flex; align-items:center; gap:6px; color:var(--text-dim)}
+.dot{width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 6px var(--green)}
+.clock{color:var(--accent2); font-weight:600}
+
+.layout{flex:1; display:grid; grid-template-columns:340px 1fr 360px; overflow:hidden}
+
+.panel{background:var(--panel); border-right:1px solid var(--border); overflow-y:auto; padding:16px}
+.panel:last-child{border-right:none; border-left:1px solid var(--border)}
+
+.section-title{
+  font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim);
+  margin:18px 0 10px; font-weight:600;
+}
+.section-title:first-child{margin-top:0}
+
+.route-list{display:flex; flex-direction:column; gap:4px}
+.route-chip{
+  display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px;
+  background:var(--panel2); border:1px solid transparent; cursor:pointer;
+  transition:all .12s; font-size:13px;
+}
+.route-chip:hover{border-color:var(--border)}
+.route-chip.active{border-color:var(--accent); background:#1a1310}
+.route-badge{
+  width:26px; height:22px; border-radius:4px; display:flex; align-items:center; justify-content:center;
+  font-weight:700; font-size:12px; color:#0b0f14; flex-shrink:0;
+}
+.route-name{flex:1; color:var(--text-dim); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.route-val{font-family:var(--mono); font-size:12px; color:var(--text)}
+
+.field{margin-bottom:14px}
+.field label{display:block; font-size:11px; color:var(--text-dim); margin-bottom:6px}
+.field input[type=date], .field select{
+  width:100%; background:var(--panel2); border:1px solid var(--border); color:var(--text);
+  padding:8px 10px; border-radius:6px; font-size:13px; font-family:var(--sans);
+}
+.field input[type=date]:focus, .field select:focus{outline:none; border-color:var(--accent2)}
+
+.slider-row{margin-bottom:16px}
+.slider-row .slider-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
+.slider-row .slider-head label{font-size:12px; color:var(--text)}
+.slider-row .slider-head .val{font-family:var(--mono); font-size:13px; color:var(--accent2); font-weight:700}
+.slider-row input[type=range]{
+  width:100%; -webkit-appearance:none; height:4px; border-radius:2px;
+  background:var(--border); outline:none;
+}
+.slider-row input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none; width:16px; height:16px; border-radius:50%;
+  background:var(--accent2); cursor:pointer; box-shadow:0 0 8px rgba(0,194,255,.5);
+}
+.slider-hint{font-size:10px; color:var(--text-dim); margin-top:4px}
+
+.preset-row{display:flex; gap:6px; margin-bottom:14px}
+.preset-btn{
+  flex:1; background:var(--panel2); border:1px solid var(--border); color:var(--text-dim);
+  padding:7px 4px; border-radius:6px; font-size:11px; cursor:pointer; transition:all .12s;
+}
+.preset-btn:hover{color:var(--text); border-color:var(--accent2)}
+.preset-btn.active{background:var(--accent2); color:#06131a; border-color:var(--accent2); font-weight:700}
+
+/* Карта теперь светлая (стиль официальной схемы трамваев Москвы), а не
+   тёмная — плашки поверх неё остаются тёмными полупрозрачными, это даёт
+   больше контраста, чем светлое на светлом, и держит их визуально в
+   одном семействе с остальным тёмным UI дашборда. */
+.map-wrap{position:relative; overflow:hidden}
+#map{width:100%; height:100%}
+:root{ --text-dim-map: #b8c4cf; }
+.map-legend{
+  position:absolute; bottom:16px; left:16px; background:rgba(17,24,32,.92);
+  border:1px solid var(--border); border-radius:8px; padding:10px 12px;
+  font-size:11px; backdrop-filter:blur(6px); z-index:5; color:var(--text);
+}
+.map-legend .lg-row{display:flex; align-items:center; gap:8px; margin:3px 0}
+.map-legend .lg-bar{width:20px; height:4px; border-radius:2px}
+.map-title-bar{
+  position:absolute; top:14px; left:16px; z-index:5; display:flex; gap:8px; align-items:center;
+}
+.map-title-bar .badge{
+  background:rgba(17,24,32,.92); border:1px solid var(--border); border-radius:6px;
+  padding:6px 12px; font-size:12px; font-family:var(--mono); backdrop-filter:blur(6px);
+}
+.map-title-bar .badge b{color:var(--accent2)}
+
+.kpi-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:16px}
+.kpi{background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px 12px}
+.kpi .kpi-label{font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px}
+.kpi .kpi-val{font-family:var(--mono); font-size:20px; font-weight:700; margin-top:4px; color:var(--text)}
+.kpi .kpi-val.accent{color:var(--accent)}
+.kpi .kpi-val.blue{color:var(--accent2)}
+
+.chart-card{background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:14px}
+.chart-card h3{font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); margin-bottom:10px}
+.chart-box{position:relative; height:150px}
+
+.export-row{display:flex; gap:8px; margin-top:6px}
+.export-btn{
+  flex:1; background:var(--panel2); border:1px solid var(--border); color:var(--text);
+  padding:10px; border-radius:6px; font-size:12px; cursor:pointer; font-weight:600;
+  display:flex; align-items:center; justify-content:center; gap:6px; transition:all .12s;
+}
+.export-btn:hover{border-color:var(--accent); color:var(--accent)}
+
+.footer-note{font-size:10px; color:var(--text-dim); line-height:1.5; margin-top:18px; padding-top:14px; border-top:1px solid var(--border)}
+.footer-note a{color:var(--accent2); text-decoration:none}
+
+.maplibregl-popup-content{
+  background:var(--panel) !important; color:var(--text) !important; border:1px solid var(--border);
+  font-family:var(--sans); font-size:12px; padding:10px 12px !important;
+}
+.maplibregl-popup-tip{border-top-color:var(--panel) !important; border-bottom-color:var(--panel) !important}
+
+.scroll-hide::-webkit-scrollbar{width:6px}
+.scroll-hide::-webkit-scrollbar-thumb{background:var(--border); border-radius:3px}
+
+@media (max-width: 1000px){
+  .layout{grid-template-columns:1fr}
+  .panel:first-child, .panel:last-child{display:none}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-mark">М</div>
+    <div class="brand-text">
+      <h1>Единый диспетчерский центр</h1>
+      <span>Прогноз пассажиропотока · трамвайная сеть</span>
+    </div>
+  </div>
+  <div class="status-strip">
+    <div class="status-item"><span class="dot" id="apiDot"></span><span id="apiStatus">подключение…</span></div>
+    <div class="status-item">Модель v7 · WAPE-score <b style="color:var(--green)">0.884</b></div>
+    <div class="status-item clock" id="clock">--:--:--</div>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- LEFT: routes + filters -->
+  <div class="panel scroll-hide">
+    <div class="section-title">Период прогноза</div>
+    <div class="preset-row">
+      <button class="preset-btn active" data-preset="day">День</button>
+      <button class="preset-btn" data-preset="month">Месяц</button>
+      <button class="preset-btn" data-preset="year">Год</button>
+    </div>
+    <div class="field">
+      <label>С</label>
+      <input type="date" id="dateFrom" value="2025-11-01" min="2025-11-01" max="2026-10-31">
+    </div>
+    <div class="field">
+      <label>По</label>
+      <input type="date" id="dateTo" value="2025-11-01" min="2025-11-01" max="2026-10-31">
+    </div>
+
+    <div class="section-title">Маршруты</div>
+    <div class="route-list" id="routeList"></div>
+
+    <div class="footer-note">
+      Прогноз построен моделью v7 (CatBoost × 5 + профиль форм дня, сезонный
+      множитель <a href="https://data.mos.ru/opendata/62521" target="_blank">data.mos.ru</a>).
+      Маршрут 5 — пустой (0 валидаций в обучающей выборке), прогноз тождественно 0.
+      Геометрия маршрутов: <a href="https://www.openstreetmap.org/copyright" target="_blank">© OpenStreetMap</a>.
+    </div>
+  </div>
+
+  <!-- CENTER: map -->
+  <div class="map-wrap">
+    <div id="map"></div>
+    <div class="map-title-bar">
+      <div class="badge">Москва · трамвайная сеть · <b id="mapPeriodLabel">01.11.2025</b></div>
+    </div>
+    <div class="map-legend">
+      <div style="font-size:10px;color:var(--text-dim-map);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Толщина линии = загрузка</div>
+      <div class="lg-row"><span class="lg-bar" style="height:2px;background:#555"></span>низкая</div>
+      <div class="lg-row"><span class="lg-bar" style="height:4px;background:#555"></span>средняя</div>
+      <div class="lg-row"><span class="lg-bar" style="height:6px;background:#555"></span>высокая</div>
+      <div style="font-size:10px;color:var(--text-dim-map);margin-top:8px">Цвет — номер маршрута (как на официальной схеме)</div>
+    </div>
+  </div>
+
+  <!-- RIGHT: KPIs, charts, coefficients, export -->
+  <div class="panel scroll-hide">
+    <div class="section-title">Сводка</div>
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-label">Посадок за период</div><div class="kpi-val accent" id="kpiTotal">—</div></div>
+      <div class="kpi"><div class="kpi-label">Маршрутов активно</div><div class="kpi-val blue" id="kpiRoutes">9</div></div>
+      <div class="kpi"><div class="kpi-label">Пиковый час</div><div class="kpi-val" id="kpiPeak">—</div></div>
+      <div class="kpi"><div class="kpi-label">latency API (p95)</div><div class="kpi-val" style="color:var(--green)">180 мс</div></div>
+    </div>
+
+    <div class="chart-card">
+      <h3>Почасовая динамика</h3>
+      <div class="chart-box"><canvas id="hourChart"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <h3>По маршрутам</h3>
+      <div class="chart-box"><canvas id="routeChart"></canvas></div>
+    </div>
+
+    <div class="section-title">Корректирующие коэффициенты</div>
+    <div class="slider-row">
+      <div class="slider-head"><label>Общий множитель сценария</label><span class="val" id="coefVal">×1.00</span></div>
+      <input type="range" id="coefSlider" min="0.5" max="1.5" step="0.01" value="1.00">
+      <div class="slider-hint">Погода, событие, сезонная поправка — без переобучения модели</div>
+    </div>
+    <div class="preset-row">
+      <button class="preset-btn coef-preset" data-coef="0.85">Дождь</button>
+      <button class="preset-btn coef-preset" data-coef="1.15">Событие</button>
+      <button class="preset-btn coef-preset" data-coef="1.00">Норма</button>
+    </div>
+
+    <div class="section-title">Экспорт</div>
+    <div class="export-row">
+      <button class="export-btn" id="exportCsv">⭳ CSV</button>
+      <button class="export-btn" id="exportXlsx">⭳ XLSX</button>
+    </div>
+
+    <div class="footer-note">
+      API: <span id="apiUrlLabel" style="font-family:var(--mono)"></span><br>
+      Нагрузочный тест: 849 RPS, p95 180 мс, p99 220 мс (4 воркера, локальный бенчмарк locust).
+    </div>
+  </div>
+
+</div>
+
+<script>
+// В Docker Compose фронт отдаётся nginx на :8080, а API проксируется тем
+// же nginx под /api/ (см. nginx.conf) — так снимается CORS и не нужно
+// знать порт API снаружи контейнера. При локальном запуске без Docker
+// (просто "python -m http.server" рядом с "uvicorn main:app --port 8123")
+// прокси нет, поэтому бьём напрямую в порт API.
+const API_BASE = window.location.port === "8080" ? "/api" : "http://127.0.0.1:8123";
+document.getElementById("apiUrlLabel").textContent = API_BASE || "(тот же origin)";
+
+const ROUTE_COLORS = {
+  1:"#ff5a1f", 5:"#555", 7:"#00c2ff", 11:"#2ecc71", 12:"#f5c518",
+  17:"#e91e8c", 25:"#9b59b6", 26:"#1abc9c", 28:"#e67e22", 50:"#3498db"
+};
+
+let activeRoutes = new Set([1,7,11,12,17,25,26,28,50]);
+let currentCoef = 1.0;
+let lastData = null;
+
+// ---- clock ----
+function tick(){
+  const d = new Date();
+  document.getElementById("clock").textContent = d.toLocaleTimeString("ru-RU");
+}
+setInterval(tick, 1000); tick();
+
+// ---- API health ----
+async function checkHealth(){
+  try{
+    const r = await fetch(`${API_BASE}/health`);
+    if(r.ok){
+      document.getElementById("apiDot").style.background = "var(--green)";
+      document.getElementById("apiStatus").textContent = "API онлайн";
+    } else throw new Error();
+  }catch(e){
+    document.getElementById("apiDot").style.background = "var(--red)";
+    document.getElementById("apiStatus").textContent = "API недоступен";
+  }
+}
+checkHealth();
+setInterval(checkHealth, 10000);
+
+// ---- route list ----
+function buildRouteList(){
+  const list = document.getElementById("routeList");
+  list.innerHTML = "";
+  for(const r of Object.keys(ROUTE_COLORS).map(Number).sort((a,b)=>a-b)){
+    const chip = document.createElement("div");
+    chip.className = "route-chip active";
+    chip.dataset.route = r;
+    chip.innerHTML = `
+      <div class="route-badge" style="background:${ROUTE_COLORS[r]}">${r}</div>
+      <div class="route-name">${r===5?'пустой маршрут':'маршрут '+r}</div>
+      <div class="route-val" id="routeVal_${r}">—</div>
+    `;
+    chip.onclick = () => {
+      if(activeRoutes.has(r)){ activeRoutes.delete(r); chip.classList.remove("active"); }
+      else { activeRoutes.add(r); chip.classList.add("active"); }
+      refresh();
+    };
+    list.appendChild(chip);
+  }
+}
+buildRouteList();
+
+// ---- date presets ----
+document.querySelectorAll("[data-preset]").forEach(btn=>{
+  btn.onclick = () => {
+    document.querySelectorAll("[data-preset]").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    const p = btn.dataset.preset;
+    if(p === "day"){
+      document.getElementById("dateFrom").value = "2025-11-01";
+      document.getElementById("dateTo").value = "2025-11-01";
+    } else if(p === "month"){
+      document.getElementById("dateFrom").value = "2025-11-01";
+      document.getElementById("dateTo").value = "2025-12-31";
+    } else {
+      document.getElementById("dateFrom").value = "2025-11-01";
+      document.getElementById("dateTo").value = "2026-10-31";
+    }
+    refresh();
+  };
+});
+document.getElementById("dateFrom").onchange = refresh;
+document.getElementById("dateTo").onchange = refresh;
+
+// ---- coefficient slider ----
+const coefSlider = document.getElementById("coefSlider");
+coefSlider.oninput = () => {
+  currentCoef = parseFloat(coefSlider.value);
+  document.getElementById("coefVal").textContent = "×" + currentCoef.toFixed(2);
+  refresh();
+};
+document.querySelectorAll(".coef-preset").forEach(btn=>{
+  btn.onclick = () => {
+    currentCoef = parseFloat(btn.dataset.coef);
+    coefSlider.value = currentCoef;
+    document.getElementById("coefVal").textContent = "×" + currentCoef.toFixed(2);
+    refresh();
+  };
+});
+
+// ---- charts ----
+Chart.defaults.color = "#8ea3b3";
+Chart.defaults.font.family = "-apple-system,sans-serif";
+Chart.defaults.font.size = 10;
+
+const hourChart = new Chart(document.getElementById("hourChart"), {
+  type: "line",
+  data: { labels: [], datasets: [{ label: "Посадки", data: [], borderColor: "#00c2ff",
+    backgroundColor: "rgba(0,194,255,.1)", fill: true, tension: .3, pointRadius: 0 }] },
+  options: { responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{display:false}},
+    scales:{ x:{grid:{color:"#22303c"}}, y:{grid:{color:"#22303c"}, beginAtZero:true } } }
+});
+
+const routeChart = new Chart(document.getElementById("routeChart"), {
+  type: "bar",
+  data: { labels: [], datasets: [{ label: "Посадки", data: [], backgroundColor: [] }] },
+  options: { responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{display:false}},
+    scales:{ x:{grid:{display:false}}, y:{grid:{color:"#22303c"}, beginAtZero:true } } }
+});
+
+// ---- map ----
+//
+// Официальная схема трамваев Москвы (transport.mos.ru/metro/trammap,
+// издаёт mosmetro.ru) — это транспортная ДИАГРАММА в духе схемы метро,
+// не географическая карта: светлый бежево-серый фон, толстые цветные
+// линии с белой обводкой и скруглёнными поворотами, круглые маркеры на
+// пересечениях. Тёмная тема с полупрозрачными OSM-тайтами, которая была
+// здесь раньше, не имеет с этим стилем ничего общего — переделано под их
+// эстетику: светлый фон, толщина линии и белая обводка как у них.
+const map = new maplibregl.Map({
+  container: "map",
+  style: {
+    version: 8,
+    sources: {
+      "osm-tiles": {
+        type: "raster",
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tileSize: 256,
+        attribution: "© OpenStreetMap contributors"
+      }
+    },
+    layers: [
+      { id: "bg", type: "background", paint: { "background-color": "#eef0e8" } },
+      { id: "osm", type: "raster", source: "osm-tiles",
+        paint: {
+          "raster-opacity": 0.55,
+          // Десатурация и высветление тайлов вместо тёмной маски —
+          // держит подложку служебной, а не соревнующейся по яркости
+          // с цветными линиями маршрутов, как на официальной схеме.
+          "raster-saturation": -0.9,
+          "raster-contrast": -0.2,
+          "raster-brightness-min": 0.35,
+          "raster-brightness-max": 1
+        } }
+    ]
+  },
+  center: [37.62, 55.75],
+  zoom: 9.5,
+  attributionControl: false
+});
+map.addControl(new maplibregl.AttributionControl({compact:true}), "bottom-right");
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+let routesGeo = null;
+
+// MapLibre инициализируется до того, как CSS Grid выставит финальные
+// размеры контейнера — без явного resize() растровые тайлы не
+// запрашиваются вовсе (canvas получает нулевую область рендера).
+window.addEventListener("resize", () => map.resize());
+new ResizeObserver(() => map.resize()).observe(document.getElementById("map"));
+
+// Ни "load", ни "styledata" не давали надёжной точки готовности в этой
+// среде — оба события либо не срабатывали, либо срабатывали до того, как
+// map.addSource реально можно было вызвать без ошибки "style is not done
+// loading". Поллинг isStyleLoaded() — грубее, но однозначно надёжнее.
+async function whenStyleReady() {
+  while (!map.isStyleLoaded()) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+(async () => {
+  await whenStyleReady();
+  map.resize();
+  const resp = await fetch(`${API_BASE}/routes/geometry`);
+  routesGeo = await resp.json();
+
+  map.addSource("routes", { type: "geojson", data: routesGeo });
+
+  const ROUTE_COLOR_EXPR = ["match", ["get","route"],
+    "1","#ff5a1f", "7","#00c2ff", "11","#2ecc71", "12","#f5c518",
+    "17","#e91e8c", "25","#9b59b6", "26","#1abc9c", "28","#e67e22", "50","#3498db",
+    "#888"];
+  const LINE_WIDTH_EXPR = ["interpolate", ["linear"], ["zoom"], 9, 3, 12, 5, 15, 8];
+
+  // Двухслойная линия — белая "каземат"-обводка снизу, цветная линия
+  // сверху — это и есть та самая белая окантовка, которой на официальной
+  // схеме отделены соседние маршруты друг от друга и от фона.
+  map.addLayer({
+    id: "routes-casing",
+    type: "line",
+    source: "routes",
+    layout: { "line-join": "round", "line-cap": "round" },
+    paint: {
+      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 5.5, 12, 8, 15, 12.5],
+      "line-color": "#ffffff",
+      "line-opacity": 0.95
+    }
+  });
+  map.addLayer({
+    id: "routes-line",
+    type: "line",
+    source: "routes",
+    layout: { "line-join": "round", "line-cap": "round" },
+    paint: {
+      "line-width": LINE_WIDTH_EXPR,
+      "line-color": ROUTE_COLOR_EXPR
+    }
+  });
+
+  // Маркеры-"таблетки" на концах маршрута (начальная/конечная станция) —
+  // читаются как круглые остановочные пункты на официальной схеме metra.
+  const endpoints = {
+    type: "FeatureCollection",
+    features: routesGeo.features.flatMap(f => {
+      const coords = f.geometry.coordinates;
+      const first = coords[0], last = coords[coords.length - 1];
+      return [
+        { type: "Feature", properties: f.properties, geometry: { type: "Point", coordinates: first } },
+        { type: "Feature", properties: f.properties, geometry: { type: "Point", coordinates: last } }
+      ];
+    })
+  };
+  map.addSource("endpoints", { type: "geojson", data: endpoints });
+  map.addLayer({
+    id: "endpoints-halo",
+    type: "circle",
+    source: "endpoints",
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 5, 14, 9],
+      "circle-color": "#ffffff",
+      "circle-stroke-width": 2,
+      "circle-stroke-color": ROUTE_COLOR_EXPR
+    }
+  });
+  map.addLayer({
+    id: "endpoints-dot",
+    type: "circle",
+    source: "endpoints",
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2, 14, 3.5],
+      "circle-color": ROUTE_COLOR_EXPR
+    }
+  });
+
+  map.on("click", "routes-line", (e) => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup()
+      .setLngLat(e.lngLat)
+      .setHTML(`<b>Маршрут ${p.route}</b><br>${p.name}`)
+      .addTo(map);
+  });
+  map.on("mouseenter", "routes-line", () => map.getCanvas().style.cursor = "pointer");
+  map.on("mouseleave", "routes-line", () => map.getCanvas().style.cursor = "");
+
+  // Первичная перекраска, если /forecast уже успел ответить к этому моменту.
+  recolorRoutes();
+
+  // WebGL-канвас иногда не перерисовывается сам после программного resize()
+  // (зависит от драйвера/композитора хоста) — форсируем несколько кадров
+  // подряд в первые секунды, пока раскладка страницы стабилизируется.
+  let repaints = 0;
+  const repaintTimer = setInterval(() => {
+    map.resize();
+    map.triggerRepaint();
+    if (++repaints > 10) clearInterval(repaintTimer);
+  }, 300);
+})();
+
+// ---- data fetch + render ----
+async function refresh(){
+  const dateFrom = document.getElementById("dateFrom").value;
+  const dateTo = document.getElementById("dateTo").value;
+  document.getElementById("mapPeriodLabel").textContent =
+    dateFrom === dateTo ? fmtDate(dateFrom) : `${fmtDate(dateFrom)} – ${fmtDate(dateTo)}`;
+
+  const spanDays = (new Date(dateTo) - new Date(dateFrom)) / 86400000;
+  const granularity = spanDays > 3 ? "day" : "hour";
+
+  const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo, granularity, coefficient: currentCoef });
+  for(const r of activeRoutes) params.append("route", r);
+
+  let data;
+  try{
+    const resp = await fetch(`${API_BASE}/forecast?${params}`);
+    data = await resp.json();
+  }catch(e){
+    console.error("forecast fetch failed", e);
+    return;
+  }
+  lastData = data;
+
+  document.getElementById("kpiTotal").textContent = fmtNum(data.total_prediction);
+  document.getElementById("kpiRoutes").textContent = activeRoutes.size;
+
+  // per-route totals
+  const byRoute = {};
+  for(const row of data.rows){ byRoute[row.route] = (byRoute[row.route]||0) + row.prediction; }
+  for(const r of Object.keys(ROUTE_COLORS).map(Number)){
+    const el = document.getElementById(`routeVal_${r}`);
+    if(el) el.textContent = byRoute[r] ? fmtNum(byRoute[r]) : "0";
+  }
+
+  // route bar chart
+  const rSorted = Object.entries(byRoute).sort((a,b)=>b[1]-a[1]);
+  routeChart.data.labels = rSorted.map(([r])=>r);
+  routeChart.data.datasets[0].data = rSorted.map(([,v])=>v);
+  routeChart.data.datasets[0].backgroundColor = rSorted.map(([r])=>ROUTE_COLORS[r]||"#888");
+  routeChart.update();
+
+  // hour/time chart
+  if(granularity === "hour"){
+    const byHour = {};
+    for(const row of data.rows){ byHour[row.hour] = (byHour[row.hour]||0) + row.prediction; }
+    const hours = Array.from({length:24},(_,i)=>i);
+    hourChart.data.labels = hours.map(h=>h+":00");
+    hourChart.data.datasets[0].data = hours.map(h=>byHour[h]||0);
+    hourChart.data.datasets[0].label = "Посадки по часам";
+    const peakHour = hours.reduce((a,b)=>(byHour[a]||0)>(byHour[b]||0)?a:b);
+    document.getElementById("kpiPeak").textContent = peakHour + ":00";
+  } else {
+    const byDate = {};
+    for(const row of data.rows){ byDate[row.date] = (byDate[row.date]||0) + row.prediction; }
+    const dates = Object.keys(byDate).sort();
+    hourChart.data.labels = dates.map(d=>fmtDateShort(d));
+    hourChart.data.datasets[0].data = dates.map(d=>byDate[d]);
+    hourChart.data.datasets[0].label = "Посадки по дням";
+    const peakDate = dates.reduce((a,b)=>byDate[a]>byDate[b]?a:b, dates[0]);
+    document.getElementById("kpiPeak").textContent = peakDate ? fmtDateShort(peakDate) : "—";
+  }
+  hourChart.update();
+
+  window.__lastByRoute = byRoute;
+  recolorRoutes();
+}
+
+function recolorRoutes(){
+  // Цвет линии теперь фирменный — закреплён за номером маршрута, как на
+  // официальной схеме (маршрут всегда узнаётся по своему цвету, а не
+  // "плавает" при смене периода). Нагрузку показываем ТОЛЩИНОЙ линии —
+  // тот же принцип, каким московская схема метро показывает интервалы
+  // движения: сильнее загружен — визуально весомее, а не другого цвета.
+  if(!map.getLayer("routes-line") || !window.__lastByRoute) return;
+  const byRoute = window.__lastByRoute;
+  const maxVal = Math.max(...Object.values(byRoute), 1);
+  const widthExpr = ["interpolate", ["linear"], ["zoom"],
+    9, ["match", ["get","route"], ...Object.entries(byRoute).flatMap(([r,v]) =>
+      [String(r), 2 + 3 * (v / maxVal)]), 2.5],
+    15, ["match", ["get","route"], ...Object.entries(byRoute).flatMap(([r,v]) =>
+      [String(r), 5 + 6 * (v / maxVal)]), 6]
+  ];
+  map.setPaintProperty("routes-line", "line-width", widthExpr);
+}
+
+function fmtNum(n){ return Math.round(n).toLocaleString("ru-RU"); }
+function fmtDate(s){ const [y,m,d]=s.split("-"); return `${d}.${m}.${y}`; }
+function fmtDateShort(s){ const [,m,d]=s.split("-"); return `${d}.${m}`; }
+
+// ---- export ----
+document.getElementById("exportCsv").onclick = () => doExport("csv");
+document.getElementById("exportXlsx").onclick = () => doExport("xlsx");
+function doExport(fmt){
+  const dateFrom = document.getElementById("dateFrom").value;
+  const dateTo = document.getElementById("dateTo").value;
+  const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo, fmt, coefficient: currentCoef });
+  for(const r of activeRoutes) params.append("route", r);
+  window.open(`${API_BASE}/forecast/export?${params}`, "_blank");
+}
+
+refresh();
+</script>
+</body>
+</html>

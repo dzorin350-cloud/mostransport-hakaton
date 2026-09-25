@@ -4,3 +4,5 @@ v7/data/grid.parquet
 __pycache__/
 *.pyc
 .venv/
+.claude/
+service/api/.venv/
