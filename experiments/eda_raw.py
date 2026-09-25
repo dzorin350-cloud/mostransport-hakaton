@@ -1,0 +1,22 @@
+import duckdb, pandas as pd
+pd.set_option('display.width',220); pd.set_option('display.max_columns',30); pd.set_option('display.max_rows',60)
+con=duckdb.connect(); con.execute("PRAGMA threads=10")
+con.execute("create view raw as select * exclude(tran_date_time), try_cast(tran_date_time as timestamp) ts from 'raw.parquet'")
+q=lambda s:con.execute(s).df()
+print(q("select count(*) n, min(ts) mn, max(ts) mx, count(distinct crd_hashcode) cards, count(distinct device_no) devices, count(distinct garage_number) vehicles, count(distinct tran_no) trans from raw"))
+cs=['tran_no','device_no','begin_date_time','input_date_time','crd_hashcode','validation_result','tran_type_id','place_id','good_type','pass_route','ngpt_route','bus_exit_no','garage_number']
+print("NULL/empty:");print(q("select "+",".join(f"sum(({c} is null or {c}='')::int) {c}" for c in cs)+" from raw").T.to_string())
+for c in ['validation_result','tran_type_id','place_id','pass_route']:
+    print(f"\n--{c}");print(q(f"select {c}, count(*) n, round(100*count(*)/sum(count(*)) over(),2) pct from raw group by 1 order by 2 desc limit 10"))
+print("\n--good_type");print(q("select good_type,count(*) n,round(100*count(*)/sum(count(*)) over(),2) pct from raw group by 1 order by 2 desc limit 15"))
+print("\n--route");print(q("select ngpt_route, count(*) n, sum((validation_result='1')::int) ok, count(distinct garage_number) veh, count(distinct device_no) dev, count(distinct bus_exit_no) exits, count(distinct crd_hashcode) cards from raw group by 1 order by 2 desc"))
+print("\n--dups");print(q("select count(*) total, count(distinct tran_no) u_tran, count(distinct (tran_no,device_no,ts,crd_hashcode)) u_key from raw"))
+print("\n--monthly");print(q("select strftime(ts,'%Y-%m') m, count(*) all_rows, sum((validation_result='1')::int) ok, count(distinct garage_number) veh, count(distinct crd_hashcode) cards, count(distinct device_no) dev from raw group by 1 order by 1"))
+print("\n--place x route");print(q("select place_id, ngpt_route, count(*) n from raw where validation_result='1' group by 1,2 order by 3 desc limit 12"))
+print("\n--pass_route vs ngpt");print(q("select pass_route, ngpt_route, count(*) n from raw group by 1,2 order by 3 desc limit 8"))
+print("\n--input lag");print(q("select quantile_cont(epoch(try_cast(input_date_time as timestamp))-epoch(ts),[0.01,0.5,0.99]) q, sum((try_cast(input_date_time as timestamp) is null)::int) bad_input, sum((try_cast(input_date_time as timestamp)>ts+interval 1 day)::int) future from raw"))
+print("\n--per-card ok count");print(q("with c as (select crd_hashcode,count(*) n from raw where validation_result='1' group by 1) select quantile_cont(n,[0.5,0.9,0.99]) q, max(n) mx from c"))
+print("\n--out of Jan-Oct range");print(q("select ts::date d,count(*) n from raw where ts<'2025-01-01' or ts>='2025-11-01' group by 1 order by 1 limit 8"))
+print("\n--good_type share by month (ok)");print(q("select strftime(ts,'%m') m, round(avg((good_type ilike '%КОШЕЛЕК%')::int),3) wallet, round(avg((good_type ilike '%дн%')::int),3) pass_days, round(avg((good_type ilike '%СКМ%')::int),3) skm from raw where validation_result='1' group by 1 order by 1"))
+print("\n--ok share by route x month (share of validation_result=1)");print(q("select ngpt_route, round(avg((validation_result='1')::int),3) ok_share, count(*) n from raw group by 1 order by 1"))
+print("\n--vehicles per route-day avg");print(q("with d as (select ngpt_route, ts::date d, count(distinct garage_number) v, count(*) n from raw where validation_result='1' group by 1,2) select ngpt_route, round(avg(v),1) veh_per_day, round(avg(n)) ok_per_day, round(corr(v,n),2) corr_veh_ok from d group by 1 order by 1"))
