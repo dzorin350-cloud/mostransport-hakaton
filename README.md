@@ -1,6 +1,6 @@
 # Хакатон МТТЕХ: прогноз посадок в трамваях Москвы
 
-> **Жюри:** запуск и проверка — [docs/JURY.md](docs/JURY.md). Внешние данные — [docs/EXTERNAL_DATA.md](docs/EXTERNAL_DATA.md),
+> **Жюри:** запуск и проверка — [docs/JURY.md](docs/JURY.md). **Команда:** статус и что осталось — [docs/STATUS.md](docs/STATUS.md). Внешние данные — [docs/EXTERNAL_DATA.md](docs/EXTERNAL_DATA.md),
 > область определения и адаптации — [docs/APPLICABILITY.md](docs/APPLICABILITY.md), все прогоны и тесты — [docs/TESTS.md](docs/TESTS.md).
 
 Почасовой прогноз посадок на 10 маршрутах трамвая (маршрут × дата × час).
