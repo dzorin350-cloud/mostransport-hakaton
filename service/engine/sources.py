@@ -106,7 +106,7 @@ def fetch_ridership(cutoff: dt.date, cache_dir: Path, timeout: float = 20) -> tu
     cache = cache_dir / "ridership_tram_monthly.csv"
     d, src, err = None, None, None
     try:
-        meta = json.loads((FALLBACK / "meta_62521.json").read_text())
+        meta = json.loads((FALLBACK / "meta_62521.json").read_text(encoding="utf-8"))
         for item in meta.get("data", [])[:1]:               # самая свежая выгрузка
             try:
                 d = _parse_62521(_get(item["source"], timeout)); src = "live"; break

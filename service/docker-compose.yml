@@ -1,5 +1,6 @@
 services:
   api:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: service/api/Dockerfile
@@ -26,8 +27,9 @@ services:
       - ../labels:/app/history:ro
       - ingest:/app/ingest           # данные, принятые через POST /ingest/* (переживают перезапуск)
       - auth:/app/auth               # пользователи (SQLite) и секрет токенов
+      - state:/app/state             # версии прогноза, архив и кэш переживают пересоздание контейнера
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -45,3 +47,4 @@ services:
 volumes:
   ingest:
   auth:
+  state:
