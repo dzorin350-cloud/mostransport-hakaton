@@ -11,6 +11,8 @@ compose up -d --build`, дашборд на http://localhost:8080. Нагруз�
 885 RPS, p95 190 мс на 4 vCPU / 4 ГБ и 610 RPS, p95 280 мс на 2 vCPU / 2 ГБ
 (подробности в `service/README.md`).
 
+**Для фронтенда:** что учитывает модель и что показывать пользователю — [`service/FRONTEND_NOTES.md`](service/FRONTEND_NOTES.md).
+
 ## Структура
 
 ```
