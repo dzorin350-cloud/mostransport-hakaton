@@ -36,6 +36,10 @@ RAIN_EFFECT = -0.025      # сильно дождливый день (3+ дне�
 RAIN_SLOTS = 3
 SHAPE_ALPHA = 0.5          # доля формы дня «тот же месяц год назад» (годовая модель, бэктест +1,2 пункта)
 HORIZON_MONTHS = 12
+import os as _os
+# forecast — прод: настоящий прогноз погоды на 16 дней вперёд от сегодняшнего дня;
+# demo — ТОЛЬКО ДЕМОНСТРАЦИЯ на стенде со старыми данными: фактическая погода из архива за первые 16 дней горизонта.
+WEATHER_MODE = _os.environ.get("WEATHER_MODE", "forecast")
 
 
 # ============================================================================ календарь
@@ -228,7 +232,15 @@ class Engine:
             Fb.loc[ok, "prediction"] = (day * mix / norm)[ok]
 
         # поправка на сильный дождь по прогнозу погоды (только ближайшие дни, где прогноз есть; сухие дни не меняются)
-        rain_slots, rain_status = sources.fetch_rain_forecast(timeout=15 if self.fetch else 0.001)
+        if WEATHER_MODE == "demo":
+            demo_end = min(h_start + dt.timedelta(days=15), h_end)
+            rain_slots, rain_status = sources.fetch_rain_archive(h_start, demo_end, timeout=20 if self.fetch else 0.001)
+            rain_status["mode"] = "demo"
+            rain_status["note"] = ("ДЕМОНСТРАЦИЯ: данные стенда старые, настоящего прогноза погоды на даты горизонта нет, поэтому для первых "
+                                   "16 дней горизонта взята фактическая погода из архива. В проде — прогноз погоды; в сабмите погода не используется.")
+        else:
+            rain_slots, rain_status = sources.fetch_rain_forecast(timeout=15 if self.fetch else 0.001)
+            rain_status["mode"] = "forecast"
         heavy = sorted(d for d, n in rain_slots.items() if n >= RAIN_SLOTS and h_start <= d <= h_end)
         if heavy:
             m = Fb.date.dt.date.isin(set(heavy))
@@ -254,6 +266,7 @@ class Engine:
             "year_shape_alpha": SHAPE_ALPHA,
             "cleaned_route_days": int(flags.m.sum()),
             "rain_adjusted_days": [str(d) for d in heavy],
+            "rain_slots_by_day": {str(d): int(n) for d, n in sorted(rain_slots.items()) if h_start <= d <= h_end},
             "rain_effect": RAIN_EFFECT,
             "route_levels_per_day": {int(k): round(float(v), 1) for k, v in L.items()},
             "sources": {"calendar": cal_status, "ridership": rid_status, "rain_forecast": rain_status},

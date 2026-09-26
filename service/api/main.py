@@ -415,7 +415,9 @@ def ingest_validations(body: str = Body(..., media_type="text/csv"), user: str =
 STOPS_PATH = Path(os.environ.get("STOPS_PATH", "/app/service/engine/artifacts/stops.csv"))
 STOPS = pd.read_csv(STOPS_PATH) if STOPS_PATH.exists() else None
 STOPS_NOTE = ("оценочная разбивка: пассажиропотока по остановкам в данных нет; прогноз маршрута распределён по остановкам "
-              "расписания GTFS (data.mos.ru) с весами по пересадочности; сумма по остановкам = прогнозу маршрута")
+              "расписания GTFS (data.mos.ru) с весами по пересадочности, жилью и точкам притяжения рядом (OpenStreetMap), "
+              "отдельно для утра, дня, вечера и ночи; сумма по остановкам = прогнозу маршрута")
+PERIOD_OF_HOUR = {h: ("morning" if 5 <= h <= 9 else "day" if 10 <= h <= 15 else "evening" if 16 <= h <= 20 else "night") for h in range(24)}
 
 
 @app.get("/stops", tags=["Остановки"], summary="Остановки маршрутов (GeoJSON) для карты")
@@ -446,9 +448,16 @@ def forecast_stops(
     mask &= (src["hour"] >= hour_from) & (src["hour"] <= hour_to)
     if route:
         mask &= src["route"].isin(route)
-    tot = (src[mask].groupby("route")["prediction"].sum() * coefficient)
+    sl = src[mask]
+    per = sl.assign(period=sl["hour"].map(PERIOD_OF_HOUR)).groupby(["route", "period"])["prediction"].sum() * coefficient
+    tot = per.groupby(level=0).sum()
     x = STOPS[STOPS.route.isin(tot.index)].copy()
-    x["prediction"] = (x["share"] * x["route"].map(tot)).round(1)
+    has_periods = "share_morning" in x.columns
+    x["prediction"] = 0.0
+    for p in ("morning", "day", "evening", "night"):
+        col = f"share_{p}" if has_periods else "share"
+        x["prediction"] += x[col] * x["route"].map(lambda r, p=p: per.get((r, p), 0.0))
+    x["prediction"] = x["prediction"].round(1)
     by_stop = (x.groupby(["stop", "stop_name", "lat", "lon"], as_index=False)
                 .agg(prediction=("prediction", "sum"), routes=("route", lambda s: sorted({int(r) for r in s})))
                 .sort_values("prediction", ascending=False))

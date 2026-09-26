@@ -145,3 +145,23 @@ def fetch_rain_forecast(timeout: float = 15) -> tuple[dict, dict]:
     except Exception as exc:
         log.warning("прогноз погоды недоступен: %s", exc)
         return {}, {"source": "open-meteo.com (прогноз)", "origin": "недоступен", "error": str(exc)[:200], "fetched_at": _now()}
+
+
+def _slots(times, precip) -> dict:
+    df = pd.DataFrame({"t": pd.to_datetime(times), "p": precip})
+    df = df[df.t.dt.hour.isin([6, 9, 12, 15, 18, 21])]
+    return (df.p.fillna(0) >= 0.1).groupby(df.t.dt.date).sum().astype(int).to_dict()
+
+
+def fetch_rain_archive(start, end, timeout: float = 20) -> tuple[dict, dict]:
+    """ТОЛЬКО ДЛЯ ДЕМОНСТРАЦИИ: фактические осадки из архива Open-Meteo за даты горизонта вместо прогноза.
+    Используется на стенде, где данные старые и настоящего прогноза погоды на даты горизонта нет. В сабмите не используется."""
+    url = (f"https://archive-api.open-meteo.com/v1/archive?latitude=55.83&longitude=37.63&start_date={start}&end_date={end}"
+           "&hourly=precipitation&timezone=Europe%2FMoscow")
+    try:
+        h = json.loads(_get(url, timeout))["hourly"]
+        s = _slots(h["time"], h["precipitation"])
+        return s, {"source": "archive-api.open-meteo.com (фактическая погода)", "origin": "live", "days": len(s), "fetched_at": _now()}
+    except Exception as exc:
+        log.warning("архив погоды недоступен: %s", exc)
+        return {}, {"source": "archive-api.open-meteo.com", "origin": "недоступен", "error": str(exc)[:200], "fetched_at": _now()}

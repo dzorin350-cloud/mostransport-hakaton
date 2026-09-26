@@ -48,6 +48,8 @@
 ## Погода и остановки
 - **Прогноз погоды** (Open-Meteo, 16 дней) скачивается при каждом пересчёте; в дни с 3+ дневными сроками осадков прогноз посадок × 0,975
   (`RAIN_EFFECT`). Дни с поправкой — `rain_adjusted_days` в `/model/info`.
+- `WEATHER_MODE=forecast` (по умолчанию, прод) — прогноз погоды; `WEATHER_MODE=demo` — **только для демонстрации** на стенде со старыми
+  данными: фактическая погода из архива за первые 16 дней горизонта (в `docker-compose.yml` стенда включён demo). На сабмит не влияет.
 - **Остановки:** `python -m service.engine.build_stops <каталог CSV data.mos.ru>` строит `artifacts/stops.csv` (доли остановок в прогнозе
   маршрута) и `artifacts/stops.geojson`; API `/stops`, `/forecast/stops`.
 
