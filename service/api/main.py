@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+import datetime as dt
 import io
 import re
 import uuid
@@ -205,6 +206,8 @@ def model_info(user: str = Depends(current_user)) -> dict:
     (live — скачано сейчас, cache — прошлая успешная загрузка, fallback — встроенная копия)."""
     FC.get()
     out = dict(FC.info)
+    out["now_mode"] = NOW_MODE
+    out["demo_today"] = (DEMO_TODAY or FC.info["horizon"]["start"]) if NOW_MODE == "demo" else None
     try:
         out["last_refresh"] = json.loads((STATE / "refresh_status.json").read_text())
     except (FileNotFoundError, ValueError):
@@ -512,11 +515,41 @@ def _daytype(dates) -> list:
             _CAL[d.year] = f.read_text().strip() if f.exists() else ""
         codes = _CAL[d.year]
         c = codes[d.dayofyear - 1] if len(codes) >= d.dayofyear else ("1" if d.dayofweek >= 5 else "0")
-        out.append("hol" if (c == "1" and d.dayofweek < 5) else ("wd" if d.dayofweek < 5 else ("sat" if d.dayofweek == 5 else "sun")))
+        if c == "1" and d.dayofweek < 5:
+            out.append("hol")
+        elif d.dayofweek < 5 or c in ("0", "2"):          # рабочий выходной (перенос) — выпуск по будничному графику
+            out.append("wd")
+        else:
+            out.append("sat" if d.dayofweek == 5 else "sun")
     return out
 
 
 _CAL: dict = {}
+
+
+def _fleet_frame(date_from, date_to, route=None, hour_from=0, hour_to=23, coefficient=1.0, min_share=0.6) -> pd.DataFrame:
+    """Прогноз посадок с коридором, загрузкой вагона, статусом и рекомендацией выпуска по (маршрут, дата, час)."""
+    if FLEET is None:
+        raise HTTPException(503, "нормы выпуска не загружены")
+    src, mask = _slice(date_from, date_to)
+    mask &= (src["hour"] >= hour_from) & (src["hour"] <= hour_to) & src["route"].isin(FLEET.route.unique())
+    if route:
+        mask &= src["route"].isin(route)
+    df = src[mask][["route", "date", "hour", "prediction"]].copy()
+    df["prediction"] = df["prediction"] * coefficient
+    lo, hi = _interval("hour", df["date"]); df["lo"] = df.prediction * lo; df["hi"] = df.prediction * hi
+    days = sorted(df["date"].unique()); dt_map = dict(zip(days, _daytype(days)))
+    df["dt"] = df["date"].map(dt_map)
+    df = df.merge(FLEET, on=["route", "dt", "hour"], how="left")
+    df["veh_typ"] = df["veh_typ"].fillna(0)
+    df["bpv"] = np.where(df.veh_typ > 0, df.prediction / df.veh_typ.replace(0, np.nan), np.nan)
+    df["load_index"] = df.bpv / df.bpv_p90
+    df["status"] = np.where(df.load_index > 1.0, "риск переполнения", np.where(df.load_index > 0.85, "повышенная", "норма"))
+    # минимум вагонов, чтобы загрузка не превышала 75-й процентиль маршрута; не меньше min_share обычного выпуска
+    # (интервалы не растут больше чем в ~1,7 раза при 0,6) — операционное ограничение
+    df["veh_recommended"] = np.maximum(np.ceil(df.prediction / df.bpv_p75), np.ceil(df.veh_typ * min_share)).clip(lower=1)
+    df["veh_delta"] = df.veh_recommended - df.veh_typ
+    return df
 
 
 @app.get("/fleet", tags=["Выпуск вагонов"], summary="Загрузка вагонов и рекомендация выпуска по часам")
@@ -530,25 +563,7 @@ def fleet(
     min_share: float = Query(0.6, ge=0, le=1.0, description="минимальная доля обычного выпуска в рекомендации"),
     user: str = Depends(current_user),
 ) -> dict:
-    if FLEET is None:
-        raise HTTPException(503, "нормы выпуска не загружены")
-    src, mask = _slice(date_from, date_to)
-    mask &= (src["hour"] >= hour_from) & (src["hour"] <= hour_to) & src["route"].isin(FLEET.route.unique())
-    if route:
-        mask &= src["route"].isin(route)
-    df = src[mask][["route", "date", "hour", "prediction"]].copy()
-    df["prediction"] = df["prediction"] * coefficient
-    days = sorted(df["date"].unique()); dt_map = dict(zip(days, _daytype(days)))
-    df["dt"] = df["date"].map(dt_map)
-    df = df.merge(FLEET, on=["route", "dt", "hour"], how="left")
-    df["veh_typ"] = df["veh_typ"].fillna(0)
-    df["bpv"] = np.where(df.veh_typ > 0, df.prediction / df.veh_typ.replace(0, np.nan), np.nan)
-    df["load_index"] = df.bpv / df.bpv_p90
-    df["status"] = np.where(df.load_index > 1.0, "риск переполнения", np.where(df.load_index > 0.85, "повышенная", "норма"))
-    # минимум вагонов, чтобы загрузка не превышала 75-й процентиль маршрута; не меньше 60 % обычного выпуска (интервалы не растут
-    # больше чем в ~1,7 раза) — операционное ограничение, задаётся параметром min_share
-    df["veh_recommended"] = np.maximum(np.ceil(df.prediction / df.bpv_p75), np.ceil(df.veh_typ * min_share)).clip(lower=1)
-    df["veh_delta"] = df.veh_recommended - df.veh_typ
+    df = _fleet_frame(date_from, date_to, route, hour_from, hour_to, coefficient, min_share)
     out = df.assign(date=df["date"].astype(str), prediction=df.prediction.round(1), bpv=df.bpv.round(1), load_index=df.load_index.round(2))
     rows = out[["route", "date", "hour", "prediction", "veh_typ", "bpv", "load_index", "status", "veh_recommended", "veh_delta"]].to_dict(orient="records")
     summ = out.groupby("route").agg(vehicle_hours_typical=("veh_typ", "sum"), vehicle_hours_recommended=("veh_recommended", "sum"),
@@ -599,3 +614,139 @@ def monitor_accuracy(date_from: str | None = Query(None), date_to: str | None = 
     return {"wape_score": score(m), "hours": int(len(m)), "days": len(by_day), "forecast_used": forecast,
             "mean_days_ahead": round(float(m.ahead_days.mean()), 1), "by_day": by_day, "by_route": by_route,
             "note": "метрика WAPE-score = 1 − Σ|факт − прогноз| / Σ факт; прогноз взят из архива на дату данных до факта"}
+
+
+# --------------------------------------------------------------------------
+# «Сейчас» и алерты для диспетчера. Демо-время: дата — виртуальная (NOW_MODE=demo), время суток — пользователя.
+# --------------------------------------------------------------------------
+NOW_MODE = os.environ.get("NOW_MODE", "real")                 # real — настоящая дата (Москва); demo — дата DEMO_TODAY
+DEMO_TODAY = os.environ.get("DEMO_TODAY", "")                 # пусто — первый день горизонта прогноза
+MSK = dt.timezone(dt.timedelta(hours=3))
+HELP = {
+    "prediction": "прогноз посадок (успешных валидаций) за час, модель v7",
+    "lo_hi": "коридор 80 %: в 8 из 10 случаев на бэктестах того же горизонта факт попадал в эти границы",
+    "load": "загрузка — посадок на вагон в час относительно истории маршрута; «риск переполнения» — выше 90-го процентиля, «повышенная» — выше 85 % от него",
+    "vehicles": "вагонов обычно — медиана вагонов с валидациями в этот час за 8 недель; рекомендация — минимум вагонов, чтобы не превышать 75-й процентиль загрузки, но не меньше 60 % обычного выпуска",
+    "stops": "по остановкам — оценочная разбивка прогноза маршрута (расписание GTFS, пересадки, жильё и точки притяжения рядом)",
+    "demo_time": "демо-время: дата сдвинута к периоду прогноза, время суток — ваше; в проде — текущая дата",
+    "weather": "поправка на сильный дождь по прогнозу погоды (−2,5 %); на стенде — демо по фактической погоде архива",
+}
+
+
+def _now(hour: int | None, date: str | None):
+    """Виртуальное «сейчас»: (дата, час, режим)."""
+    h = FC.info["horizon"]
+    if date:
+        d = date
+    elif NOW_MODE == "demo":
+        d = DEMO_TODAY or h["start"]
+    else:
+        d = dt.datetime.now(MSK).date().isoformat()
+    try:
+        pd.to_datetime(d, format="%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"неверная дата «{d}»: нужно ГГГГ-ММ-ДД") from None
+    if not (h["start"] <= d <= h["end"]):
+        raise HTTPException(400, f"дата {d} вне горизонта прогноза {h['start']} … {h['end']}")
+    hh = dt.datetime.now(MSK).hour if hour is None else hour
+    return d, hh, ("demo" if (NOW_MODE == "demo" or date) else "real")
+
+
+def _daykind(d: str) -> str | None:
+    t = pd.Timestamp(d)
+    f = STATE / "cache" / f"cal_{t.year}.txt"
+    if not f.exists():
+        f = Path("/app/service/engine/fallback") / f"cal_{t.year}.txt"
+    codes = f.read_text().strip() if f.exists() else ""
+    c = codes[t.dayofyear - 1] if len(codes) >= t.dayofyear else ""
+    if c == "1" and t.dayofweek < 5:
+        return "нерабочий праздничный день"
+    if c in ("0", "2") and t.dayofweek >= 5:
+        return "рабочий выходной (перенос)" + (", сокращённый" if c == "2" else "")
+    if c == "2":
+        return "предпраздничный сокращённый день"
+    return None
+
+
+def _hours_text(hrs: list) -> str:
+    """[8, 9, 11] → «8:00–10:00, 11:00–12:00»"""
+    parts, start = [], hrs[0]
+    for a, b in zip(hrs, hrs[1:] + [None]):
+        if b != a + 1:
+            parts.append(f"{start}:00–{a + 1}:00"); start = b
+    return ", ".join(parts)
+
+
+@app.get("/now", tags=["Диспетчер"], summary="Что сейчас: текущий час и 3 следующих по маршрутам")
+def now(hour: int | None = Query(None, ge=0, le=23, description="час пользователя; по умолчанию — текущий час (Москва)"),
+        date: str | None = Query(None, description="дата «сегодня» (только для демо); по умолчанию — демо-дата или текущая"),
+        route: list[int] | None = Query(None), user: str = Depends(current_user)) -> dict:
+    d, hh, mode = _now(hour, date)
+    h_end = min(hh + 3, 23)
+    df = _fleet_frame(d, d, route, 0, 23)
+    cur = df[df.hour == hh]; nxt = df[(df.hour > hh) & (df.hour <= h_end)]
+    def rec(x):
+        return {"hour": int(x.hour), "prediction": round(float(x.prediction), 1), "lo": round(float(x.lo), 1), "hi": round(float(x.hi), 1),
+                "veh_typ": float(x.veh_typ), "veh_recommended": float(x.veh_recommended), "veh_delta": float(x.veh_delta),
+                "load_index": None if pd.isna(x.load_index) else round(float(x.load_index), 2), "status": x.status}
+    routes = []
+    for r, g in df.groupby("route"):
+        c = g[g.hour == hh]
+        routes.append({"route": int(r), "now": rec(c.iloc[0]) if len(c) else None,
+                       "next": [rec(x) for x in g[(g.hour > hh) & (g.hour <= h_end)].itertuples()],
+                       "day_total": round(float(g.prediction.sum()), 1), "day_passed": round(float(g[g.hour < hh].prediction.sum()), 1)})
+    return {"mode": mode, "today": d, "hour": hh, "day_kind": _daykind(d), "data_until": FC.info.get("data_until"),
+            "network": {"now": round(float(cur.prediction.sum()), 1), "now_lo": round(float(cur.lo.sum()), 1), "now_hi": round(float(cur.hi.sum()), 1),
+                        "next_hours": round(float(nxt.prediction.sum()), 1), "day_total": round(float(df.prediction.sum()), 1),
+                        "day_passed": round(float(df[df.hour < hh].prediction.sum()), 1),
+                        "routes_at_risk_now": sorted(int(x) for x in cur[cur.status == "риск переполнения"].route)},
+            "routes": routes, "help": HELP}
+
+
+@app.get("/alerts", tags=["Диспетчер"], summary="Предупреждения для диспетчера на текущий момент")
+def alerts(hour: int | None = Query(None, ge=0, le=23), date: str | None = Query(None), lookahead: int = Query(3, ge=1, le=12),
+           user: str = Depends(current_user)) -> dict:
+    d, hh, mode = _now(hour, date)
+    out = []
+    def add(level, kind, text, **kw):
+        out.append({"level": level, "type": kind, "text": text, **kw})
+    df = _fleet_frame(d, d, None, 0, 23)
+    win = df[(df.hour >= hh) & (df.hour <= min(hh + lookahead, 23))]
+    for r, g in win[win.status == "риск переполнения"].groupby("route"):
+        hrs = sorted(int(x) for x in g.hour)
+        add("критично", "переполнение", f"Маршрут {r}, {_hours_text(hrs)}: риск переполнения, рекомендуется +{int(g.veh_delta.max())} ваг.",
+            route=int(r), hours=hrs, veh_delta=int(g.veh_delta.max()))
+    for r, g in win[win.status == "повышенная"].groupby("route"):
+        hrs = sorted(int(x) for x in g.hour)
+        add("внимание", "повышенная загрузка", f"Маршрут {r}, {_hours_text(hrs)}: повышенная загрузка", route=int(r), hours=hrs)
+    spare = win[(win.veh_delta <= -3) & (win.status == "норма")]
+    for r, g in spare.groupby("route"):
+        add("инфо", "избыток вагонов", f"Маршрут {r}, {_hours_text(sorted(int(x) for x in g.hour))}: загрузка низкая, можно снять до {int(-g.veh_delta.min())} ваг. без роста интервалов более чем в 1,7 раза",
+            route=int(r), hours=sorted(int(x) for x in g.hour))
+    for k in range(0, 8):                                          # праздники и переносы: сегодня и 7 дней вперёд
+        day = (pd.Timestamp(d) + pd.Timedelta(days=k)).date().isoformat()
+        kind = _daykind(day) if day <= FC.info["horizon"]["end"] else None
+        if kind:
+            add("инфо" if k else "внимание", "календарь", f"{'Сегодня' if k == 0 else day}: {kind} — спрос отличается от обычного", date=day)
+    rain = [x for x in FC.info.get("rain_adjusted_days", []) if d <= x <= (pd.Timestamp(d) + pd.Timedelta(days=7)).date().isoformat()]
+    for x in rain:
+        add("инфо", "погода", f"{'Сегодня' if x == d else x}: ожидается сильный дождь — прогноз снижен на 2,5 %"
+            + (" (демо: фактическая погода архива)" if FC.info.get("sources", {}).get("rain_forecast", {}).get("mode") == "demo" else ""), date=x)
+    lag = (pd.Timestamp(d) - pd.Timestamp(FC.info["data_until"])).days
+    if lag > 2:
+        add("внимание", "данные", f"Последние фактические данные — {FC.info['data_until']}: прогноз на {lag} дн. вперёд, точность ниже (коридор шире)", days=lag)
+    try:
+        st = json.loads((STATE / "refresh_status.json").read_text())
+        if not st.get("ok", True):
+            add("критично", "пересчёт", f"Прогноз не обновился ({st.get('error', '')[:120]}); действует прошлая версия")
+    except (FileNotFoundError, ValueError):
+        pass
+    try:
+        acc = monitor_accuracy(date_from=(pd.Timestamp(d) - pd.Timedelta(days=7)).date().isoformat(), date_to=d, forecast="latest", user=user)
+        if acc.get("wape_score") is not None and acc["wape_score"] < 0.85:
+            add("внимание", "точность", f"Точность прогноза за последние 7 дней {acc['wape_score']:.3f} — ниже обычной (0,88–0,90)")
+    except Exception:
+        pass
+    order = {"критично": 0, "внимание": 1, "инфо": 2}
+    out.sort(key=lambda a: order[a["level"]])
+    return {"mode": mode, "today": d, "hour": hh, "count": len(out), "alerts": out}

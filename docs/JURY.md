@@ -46,6 +46,8 @@ curl -H "$H" "$B/forecast?date_from=2025-11-10&date_to=2025-11-16&granularity=we
 curl -H "$H" -o forecast.xlsx "$B/forecast/export?date_from=2025-11-01&date_to=2025-11-07&fmt=xlsx"
 curl -H "$H" "$B/forecast/stops?date_from=2025-11-12&date_to=2025-11-12&route=17&hour_from=7&hour_to=9"  # по остановкам
 curl -H "$H" "$B/fleet?date_from=2025-11-13&date_to=2025-11-13&route=17&hour_from=6&hour_to=21"      # загрузка вагонов и рекомендация выпуска
+curl -H "$H" "$B/now?hour=8"                                                                   # «что сейчас» (демо-дата 01.11.2025, ваш час)
+curl -H "$H" "$B/alerts?hour=18&date=2025-11-13"                                              # предупреждения для диспетчера
 curl -H "$H" "$B/monitor/accuracy"                                                             # факт против прогноза (после приёма данных)
 curl -H "$H" "$B/forecast?date_from=2027-01-01&date_to=2027-01-02"                            # вне горизонта → понятная ошибка
 ```
@@ -58,6 +60,7 @@ curl -H "$H" "$B/forecast?date_from=2027-01-01&date_to=2027-01-02"              
 | `GET /model/info` | дата данных, горизонт, множители, источники внешних данных и их статус |
 | `POST /ingest/hourly` | почасовые посадки CSV `route;date;hour;boardings` |
 | `POST /ingest/validations` | сырые валидации в формате `train.csv`, агрегация на стороне сервиса |
+| `GET /now`, `GET /alerts` | «что сейчас» и предупреждения для диспетчера; на стенде демо-время: дата 01.11.2025 (первый день прогноза), время — ваше |
 | `GET /fleet` | загрузка вагонов по часам (норма / повышенная / риск переполнения) и рекомендация выпуска вагонов |
 | `GET /monitor/accuracy` | потоковый контроль: точность прогноза на поступивших фактах (прогноз из архива, сделанный до факта) |
 | `GET /stops`, `GET /forecast/stops` | остановки и прогноз по остановкам (оценочная разбивка по расписанию GTFS) |
