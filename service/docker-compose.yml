@@ -5,12 +5,15 @@ services:
       dockerfile: api/Dockerfile
     ports:
       - "8123:8000"
-    # ТЗ: сервис — один контейнер 2-4 vCPU / 2-4 ГБ RAM.
+    # ТЗ: сервис — один контейнер 2-4 vCPU / 2-4 ГБ RAM. По умолчанию — максимум (4 vCPU / 4 ГБ, 4 воркера);
+    # минимальная конфигурация (2 vCPU / 2 ГБ, 2 воркера): docker-compose.2cpu.yml.
+    environment:
+      WORKERS: "4"
     deploy:
       resources:
         limits:
-          cpus: "2"
-          memory: 2g
+          cpus: "4"
+          memory: 4g
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s

@@ -8,7 +8,8 @@
 **Веб-сервис** (REST API + дашборд с картой, требование ТЗ п.3–4) — в
 [`service/`](service/README.md). Быстрый старт: `cd service && docker
 compose up -d --build`, дашборд на http://localhost:8080. Нагрузочный тест:
-849 RPS, p95 180 мс (подробности в `service/README.md`).
+885 RPS, p95 190 мс на 4 vCPU / 4 ГБ и 610 RPS, p95 280 мс на 2 vCPU / 2 ГБ
+(подробности в `service/README.md`).
 
 ## Структура
 

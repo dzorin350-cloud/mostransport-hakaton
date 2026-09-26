@@ -1,0 +1,11 @@
+# Минимальная конфигурация по ТЗ: 2 vCPU / 2 ГБ RAM, 2 воркера uvicorn.
+# Запуск: docker compose -f docker-compose.yml -f docker-compose.2cpu.yml up -d --build
+services:
+  api:
+    environment:
+      WORKERS: "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
