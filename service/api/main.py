@@ -338,12 +338,15 @@ def forecast_export(
     date_from: str = Query(...),
     date_to: str = Query(...),
     route: list[int] | None = Query(None),
+    hour_from: int = Query(0, ge=0, le=23),
+    hour_to: int = Query(23, ge=0, le=23),
     fmt: Literal["csv", "xlsx"] = Query("csv"),
     coefficient: float = Query(1.0, gt=0, le=3.0),
     user: str = Depends(current_user),
 ) -> Response:
     """Выгрузка прогноза в CSV или XLSX (критерий ТЗ п.4: экспорт данных)."""
     src, mask = _slice(date_from, date_to)
+    mask &= (src["hour"] >= hour_from) & (src["hour"] <= hour_to)
     if route:
         mask &= src["route"].isin(route)
     df = src[mask].copy()
