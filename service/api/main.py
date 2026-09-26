@@ -4,7 +4,7 @@
 (service/engine/refresher.py) применяет обученную модель v7 к истории
 валидаций и внешним данным, которые сам скачивает (календарь isdayoff.ru,
 сезонность data.mos.ru), и публикует почасовой прогноз на 12 месяцев вперёд
-в STATE_DIR/forecast.parquet. Воркеры API держат его в памяти и
+в STATE_DIR/versions/<id>/forecast.parquet. Воркеры API держат его в памяти и
 перечитывают при обновлении. На каждый HTTP-запрос ML не запускается —
 только фильтр и агрегация готовой сетки. Причины:
 
@@ -34,18 +34,22 @@ from typing import Literal
 
 import datetime as dt
 import io
+import hashlib
+from functools import lru_cache
 import re
-import uuid
 
 import numpy as np
 import pandas as pd
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from pydantic import BaseModel, Field
 
 from auth import current_user, router as auth_router
+from store import list_decisions, log_ingest, save_decision
 
 # DATA_DIR — статические данные сервиса (геометрия маршрутов); STATE_DIR — прогноз, который публикует движок.
 DATA = Path(os.environ.get("DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")))
@@ -59,6 +63,7 @@ app = FastAPI(
 )
 app.include_router(auth_router)
 INGEST = Path(os.environ.get("INGEST_DIR", "/app/ingest"))
+MAX_INGEST_BYTES = int(os.environ.get("MAX_INGEST_BYTES", str(10 * 1024 * 1024)))
 
 
 # ------------------------------------------------------------------ ошибки — понятные сообщения на русском
@@ -118,22 +123,30 @@ class _Forecast:
         self.info: dict = {}
         self._mtime = 0.0
         self._checked = 0.0
+        self.version = ""
 
     def _load(self) -> None:
-        df = pd.read_parquet(STATE / "forecast.parquet")
+        pointer = STATE / "current.json"
+        version = json.loads(pointer.read_text(encoding="utf-8"))["version"]
+        if not re.fullmatch(r"[0-9]+-[a-f0-9]{8}", version):
+            raise RuntimeError("некорректная версия прогноза")
+        directory = STATE / "versions" / version
+        df = pd.read_parquet(directory / "forecast.parquet")
+        info = json.loads((directory / "info.json").read_text(encoding="utf-8"))
         ts = pd.to_datetime(df["date"])
         df = df.assign(_d=(ts - pd.Timestamp("1970-01-01")).dt.days.astype("int32"))
         df = df.sort_values(["_d", "route", "hour"], kind="stable").reset_index(drop=True)
         df["date"] = pd.to_datetime(df["_d"], unit="D").dt.date
         df["prediction"] = df["prediction"].astype(float)
         self.days = df["_d"].to_numpy()          # отсортировано — диапазон дат ищется двоичным поиском
-        self.info = json.loads((STATE / "info.json").read_text())
+        self.info = info
         self.df = df
-        self._mtime = (STATE / "forecast.parquet").stat().st_mtime
+        self.version = version
+        self._mtime = pointer.stat().st_mtime_ns
 
     def wait_first(self) -> None:
         t0 = time.monotonic()
-        while not (STATE / "forecast.parquet").exists():
+        while not (STATE / "current.json").exists():
             if time.monotonic() - t0 > STARTUP_WAIT_S:
                 raise RuntimeError("движок не опубликовал прогноз")
             time.sleep(1)
@@ -144,7 +157,7 @@ class _Forecast:
         if now - self._checked > 30:          # не чаще раза в 30 с проверяем, не вышла ли новая версия
             self._checked = now
             try:
-                if (STATE / "forecast.parquet").stat().st_mtime != self._mtime:
+                if (STATE / "current.json").stat().st_mtime_ns != self._mtime:
                     self._load()
             except FileNotFoundError:
                 pass
@@ -153,7 +166,7 @@ class _Forecast:
 
 FC = _Forecast()
 FC.wait_first()
-ROUTES_GEOJSON = json.loads((DATA / "routes.geojson").read_text())
+ROUTES_GEOJSON = json.loads((DATA / "routes.geojson").read_text(encoding="utf-8"))
 ROUTES = sorted(r for r in FC.df["route"].unique().tolist() if FC.df.loc[FC.df.route == r, "prediction"].sum() > 0)
 
 _boot_time = time.monotonic()
@@ -185,6 +198,18 @@ def health() -> dict:
             "data_until": FC.info.get("data_until"), "computed_at": FC.info.get("computed_at")}
 
 
+@app.get("/ready")
+def ready() -> dict:
+    FC.get()
+    try:
+        status = json.loads((STATE / "refresh_status.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(503, "прогноз ещё не опубликован или статус пересчёта недоступен") from None
+    if not status.get("ok"):
+        raise HTTPException(503, "последний пересчёт прогноза не удался; действует предыдущая версия")
+    return {"status": "ready", "version": FC.version, "computed_at": FC.info.get("computed_at")}
+
+
 @app.get("/metrics")
 def metrics() -> dict:
     FC.get()
@@ -209,7 +234,7 @@ def model_info(user: str = Depends(current_user)) -> dict:
     out["now_mode"] = NOW_MODE
     out["demo_today"] = (DEMO_TODAY or FC.info["horizon"]["start"]) if NOW_MODE == "demo" else None
     try:
-        out["last_refresh"] = json.loads((STATE / "refresh_status.json").read_text())
+        out["last_refresh"] = json.loads((STATE / "refresh_status.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
         pass
     return out
@@ -267,10 +292,10 @@ def _slice(date_from: str, date_to: str):
         raise HTTPException(400, f"неверный формат даты: нужно ГГГГ-ММ-ДД, получено «{date_from}» и «{date_to}»") from None
     if d0 > d1:
         raise HTTPException(400, "date_from должна быть раньше date_to")
+    src = FC.get()
     h = FC.info["horizon"]
     if str(d0) < h["start"] or str(d1) > h["end"]:
         raise HTTPException(400, f"прогноз доступен на {h['start']} … {h['end']} (12 месяцев от даты данных {FC.info['data_until']})")
-    src = FC.get()
     days = src["_d"].to_numpy()               # из той же версии таблицы (безопасно при горячей перезагрузке)
     lo = days.searchsorted((pd.Timestamp(d0) - pd.Timestamp("1970-01-01")).days, side="left")
     hi = days.searchsorted((pd.Timestamp(d1) - pd.Timestamp("1970-01-01")).days, side="right")
@@ -375,12 +400,36 @@ def forecast_export(
 # --------------------------------------------------------------------------
 
 def _store(df: pd.DataFrame, kind: str, user: str) -> dict:
-    df = df.groupby(["route", "date", "hour"], as_index=False)["boardings"].sum()
+    df = df.groupby(["route", "date", "hour"], as_index=False)["boardings"].sum().sort_values(["route", "date", "hour"])
     INGEST.mkdir(parents=True, exist_ok=True)
-    name = f"ingest_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.csv"
-    tmp = INGEST / (name + ".tmp")
-    df.to_csv(tmp, sep=";", index=False)
-    os.replace(tmp, INGEST / name)                     # движок видит файл только целиком
+    payload = df.to_csv(sep=";", index=False)
+    name = f"ingest_{hashlib.sha256(payload.encode()).hexdigest()[:24]}.csv"
+    # Serialize writers from all uvicorn workers. The lock is released by the OS on a crash.
+    with (INGEST / ".write.lock").open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            if (INGEST / name).exists():
+                log_ingest(name, user, kind, len(df))
+                return {"принято_строк": 0, "повтор": True, "файл": name, "сообщение": "этот пакет уже принят"}
+            incoming = set(zip(df.route, df.date, df.hour))
+            for old in INGEST.glob("ingest_*.csv"):
+                prior = pd.read_csv(old, sep=";", usecols=["route", "date", "hour"])
+                if incoming.intersection(zip(prior.route, prior.date, prior.hour)):
+                    raise HTTPException(409, f"часы из пакета уже загружены в {old.name}; повторное суммирование запрещено")
+            tmp = INGEST / (name + ".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, INGEST / name)             # движок видит файл только целиком
+        finally:
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+    log_ingest(name, user, kind, len(df))
     return {"принято_строк": int(len(df)), "дат": sorted(df["date"].unique().tolist()), "файл": name, "тип": kind,
             "пользователь": user,
             "сообщение": "данные сохранены; движок подхватит их и пересчитает прогноз в течение ~1 минуты "
@@ -388,13 +437,35 @@ def _store(df: pd.DataFrame, kind: str, user: str) -> dict:
 
 
 def _check_new(df: pd.DataFrame) -> None:
+    if df.empty:
+        raise HTTPException(400, "пакет пуст")
+    if not set(df.route.unique()).issubset(set(ROUTES)):
+        raise HTTPException(400, f"неизвестный маршрут; допустимы {ROUTES}")
     last = FC.info.get("data_until")
     if last and (df["date"] <= last).any():
         raise HTTPException(409, f"данные за {last} и ранее уже есть в истории; принимаются только даты после {last}")
 
 
+async def _ingest_body(request: Request) -> str:
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_INGEST_BYTES:
+            raise HTTPException(413, f"файл слишком велик; максимум {MAX_INGEST_BYTES // 1048576} МБ")
+        chunks.append(chunk)
+    try:
+        return b"".join(chunks).decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "CSV должен быть в UTF-8") from None
+
+
 @app.post("/ingest/hourly", tags=["Приём данных"], summary="Почасовые посадки: CSV route;date;hour;boardings")
-def ingest_hourly(body: str = Body(..., media_type="text/csv"), user: str = Depends(current_user)) -> dict:
+async def ingest_hourly(request: Request, user: str = Depends(current_user)) -> dict:
+    body = await _ingest_body(request)
+    return await run_in_threadpool(_ingest_hourly_sync, body, user)
+
+
+def _ingest_hourly_sync(body: str, user: str) -> dict:
     try:
         df = pd.read_csv(io.StringIO(body), sep=";")
     except Exception as exc:
@@ -404,18 +475,28 @@ def ingest_hourly(body: str = Body(..., media_type="text/csv"), user: str = Depe
         raise HTTPException(400, f"нужны колонки {sorted(need)} с разделителем «;», получены {list(df.columns)}")
     try:
         df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d").dt.strftime("%Y-%m-%d")
-        df["route"] = df["route"].astype(int); df["hour"] = df["hour"].astype(int); df["boardings"] = df["boardings"].astype(float)
+        for col in ("route", "hour"):
+            numbers = pd.to_numeric(df[col], errors="raise")
+            if not np.isfinite(numbers).all() or not (numbers == np.floor(numbers)).all():
+                raise ValueError(f"{col} должен быть целым числом")
+            df[col] = numbers.astype(int)
+        df["boardings"] = df["boardings"].astype(float)
     except Exception as exc:
         raise HTTPException(400, f"неверный формат значений (дата ГГГГ-ММ-ДД, route/hour — целые, boardings — число): {exc}") from exc
-    if not df["hour"].between(0, 23).all() or (df["boardings"] < 0).any():
-        raise HTTPException(400, "hour должен быть 0–23, boardings — не отрицательным")
+    if not df["hour"].between(0, 23).all() or not np.isfinite(df["boardings"]).all() or (df["boardings"] < 0).any():
+        raise HTTPException(400, "hour должен быть 0–23, boardings — конечным неотрицательным числом")
     _check_new(df)
     return _store(df, "hourly", user)
 
 
 @app.post("/ingest/validations", tags=["Приём данных"],
           summary="Сырые валидации в формате train.csv (разделитель «;»): агрегация на стороне сервиса")
-def ingest_validations(body: str = Body(..., media_type="text/csv"), user: str = Depends(current_user)) -> dict:
+async def ingest_validations(request: Request, user: str = Depends(current_user)) -> dict:
+    body = await _ingest_body(request)
+    return await run_in_threadpool(_ingest_validations_sync, body, user)
+
+
+def _ingest_validations_sync(body: str, user: str) -> dict:
     try:
         v = pd.read_csv(io.StringIO(body), sep=";", dtype=str, quoting=3)
     except Exception as exc:
@@ -470,6 +551,13 @@ def forecast_stops(
     coefficient: float = Query(1.0, gt=0, le=3.0),
     user: str = Depends(current_user),
 ) -> dict:
+    FC.get()
+    return _stops_cached(FC.version, date_from, date_to, tuple(route or ()), hour_from, hour_to, coefficient)
+
+
+@lru_cache(maxsize=256)
+def _stops_cached(version: str, date_from: str, date_to: str, route: tuple[int, ...],
+                  hour_from: int, hour_to: int, coefficient: float) -> dict:
     if STOPS is None:
         raise HTTPException(503, "справочник остановок не загружен")
     src, mask = _slice(date_from, date_to)
@@ -529,6 +617,13 @@ _CAL: dict = {}
 
 def _fleet_frame(date_from, date_to, route=None, hour_from=0, hour_to=23, coefficient=1.0, min_share=0.6) -> pd.DataFrame:
     """Прогноз посадок с коридором, загрузкой вагона, статусом и рекомендацией выпуска по (маршрут, дата, час)."""
+    FC.get()
+    return _fleet_cached(FC.version, date_from, date_to, tuple(route or ()), hour_from, hour_to,
+                         coefficient, min_share).copy()
+
+
+@lru_cache(maxsize=256)
+def _fleet_cached(version, date_from, date_to, route, hour_from, hour_to, coefficient, min_share) -> pd.DataFrame:
     if FLEET is None:
         raise HTTPException(503, "нормы выпуска не загружены")
     src, mask = _slice(date_from, date_to)
@@ -575,6 +670,92 @@ def fleet(
             "rows": rows}
 
 
+def _plan_data(date_from: str, date_to: str, route: list[int] | None, coefficient: float,
+               min_share: float) -> tuple[pd.DataFrame, dict]:
+    try:
+        start, end = pd.Timestamp(dt.date.fromisoformat(date_from)), pd.Timestamp(dt.date.fromisoformat(date_to))
+    except ValueError:
+        raise HTTPException(400, "даты плана должны быть в формате ГГГГ-ММ-ДД") from None
+    if (end - start).days > 6:
+        raise HTTPException(400, "план выпуска доступен максимум на 7 дней за один запрос")
+    df = _fleet_frame(date_from, date_to, route, 5, 23, coefficient, min_share)
+    if df.empty:
+        raise HTTPException(404, "нет данных для плана на выбранный период")
+    rain_days = set(FC.info.get("rain_adjusted_days", []))
+    def reason(x):
+        d = str(x.date)
+        if d in rain_days:
+            return "сильный дождь; поправка уже учтена в базовом прогнозе"
+        if x.dt == "hol":
+            return "праздничный день"
+        if coefficient != 1:
+            return f"сценарий ×{coefficient:g}"
+        if x.veh_delta > 0:
+            return "спрос выше обычного для этого часа"
+        if x.veh_delta < 0:
+            return "спрос ниже обычного для этого часа"
+        return "выпуск без изменений"
+    df["reason"] = [reason(x) for x in df.itertuples()]
+    df["risk_before"] = df["prediction"] / df["veh_typ"].replace(0, np.nan) > df["bpv_p90"]
+    df["risk_after"] = df["prediction"] / df["veh_recommended"].replace(0, np.nan) > df["bpv_p90"]
+    total = {
+        "vehicle_hours_typical": float(df.veh_typ.sum()),
+        "vehicle_hours_recommended": float(df.veh_recommended.sum()),
+        "vehicle_hours_delta": float(df.veh_delta.sum()),
+        "risk_route_hours_before": int(df.risk_before.sum()),
+        "risk_route_hours_after_estimate": int(df.risk_after.sum()),
+        "risk_route_hours_reduced_estimate": int(df.risk_before.sum() - df.risk_after.sum()),
+    }
+    return df, total
+
+
+@app.get("/plan", tags=["План выпуска"], summary="План выпуска вагонов на 1–7 дней")
+def plan(date_from: str = Query(...), date_to: str = Query(...), route: list[int] | None = Query(None),
+         coefficient: float = Query(1.0, gt=0, le=3), min_share: float = Query(0.6, ge=0, le=1),
+         user: str = Depends(current_user)) -> dict:
+    FC.get()
+    return _plan_cached(FC.version, date_from, date_to, tuple(route or ()), coefficient, min_share)
+
+
+@lru_cache(maxsize=64)
+def _plan_cached(version: str, date_from: str, date_to: str, route: tuple[int, ...],
+                 coefficient: float, min_share: float) -> dict:
+    df, total = _plan_data(date_from, date_to, list(route) if route else None, coefficient, min_share)
+    cols = ["route", "date", "hour", "prediction", "lo", "hi", "veh_typ", "veh_recommended", "veh_delta", "status", "reason"]
+    rows = df[cols].copy()
+    rows["date"] = rows["date"].astype(str)
+    for col in ("prediction", "lo", "hi"):
+        rows[col] = rows[col].round(1)
+    return {"count": len(rows), "coefficient_applied": coefficient, "total": total,
+            "note": FLEET_NOTE + " Снижение часов риска — оценка при выполнении плана, не измеренный эффект.",
+            "data_until": FC.info.get("data_until"), "rows": rows.to_dict(orient="records")}
+
+
+@app.get("/plan/export", tags=["План выпуска"], summary="Выгрузить план выпуска в XLSX")
+def plan_export(date_from: str = Query(...), date_to: str = Query(...), route: list[int] | None = Query(None),
+                coefficient: float = Query(1.0, gt=0, le=3), min_share: float = Query(0.6, ge=0, le=1),
+                user: str = Depends(current_user)) -> Response:
+    FC.get()
+    body = _plan_export_bytes(FC.version, date_from, date_to, tuple(route or ()), coefficient, min_share)
+    return Response(content=body, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="plan_{date_from}_{date_to}.xlsx"'})
+
+
+@lru_cache(maxsize=64)
+def _plan_export_bytes(version: str, date_from: str, date_to: str, route: tuple[int, ...],
+                       coefficient: float, min_share: float) -> bytes:
+    df, total = _plan_data(date_from, date_to, list(route) if route else None, coefficient, min_share)
+    out = df[["route", "date", "hour", "prediction", "lo", "hi", "veh_typ", "veh_recommended", "veh_delta", "reason"]].copy()
+    out["date"] = out.date.astype(str)
+    out.columns = ["Маршрут", "Дата", "Час", "Посадки", "Нижняя граница", "Верхняя граница",
+                   "Обычно вагонов", "Рекомендуется", "Изменение", "Причина"]
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        out.to_excel(writer, sheet_name="План выпуска", index=False)
+        pd.DataFrame([total]).to_excel(writer, sheet_name="Итоги", index=False)
+    return buf.getvalue()
+
+
 # --------------------------------------------------------------------------
 # Потоковый контур: факт против прогноза, сделанного ДО поступления факта
 # --------------------------------------------------------------------------
@@ -587,6 +768,13 @@ def monitor_accuracy(date_from: str | None = Query(None), date_to: str | None = 
                      forecast: Literal["latest", "earliest"] = Query("latest", description="latest — самый свежий прогноз до факта, earliest — самый ранний"),
                      user: str = Depends(current_user)) -> dict:
     """Для каждой даты с фактом берётся прогноз из архива, опубликованный по данным ДО этой даты (честная проверка «как в жизни»)."""
+    files = tuple(sorted((str(f), f.stat().st_mtime_ns, f.stat().st_size)
+                         for d in HIST_DIRS + [ARCHIVE] if d.exists() for f in d.glob("*.csv" if d != ARCHIVE else "*.parquet")))
+    return _accuracy_cached(date_from, date_to, forecast, files)
+
+
+@lru_cache(maxsize=64)
+def _accuracy_cached(date_from: str | None, date_to: str | None, forecast: str, files: tuple) -> dict:
     snaps = sorted(ARCHIVE.glob("forecast_until_*.parquet"))
     if not snaps:
         return {"detail": "архив прогнозов пуст: точность появится после поступления новых фактических данных", "rows": []}
@@ -680,10 +868,17 @@ def _hours_text(hrs: list) -> str:
 @app.get("/now", tags=["Диспетчер"], summary="Что сейчас: текущий час и 3 следующих по маршрутам")
 def now(hour: int | None = Query(None, ge=0, le=23, description="час пользователя; по умолчанию — текущий час (Москва)"),
         date: str | None = Query(None, description="дата «сегодня» (только для демо); по умолчанию — демо-дата или текущая"),
-        route: list[int] | None = Query(None), user: str = Depends(current_user)) -> dict:
+        route: list[int] | None = Query(None), coefficient: float = Query(1.0, gt=0, le=3),
+        user: str = Depends(current_user)) -> dict:
     d, hh, mode = _now(hour, date)
+    FC.get()
+    return _now_cached(FC.version, d, hh, mode, tuple(route or ()), coefficient)
+
+
+@lru_cache(maxsize=256)
+def _now_cached(version: str, d: str, hh: int, mode: str, route: tuple[int, ...], coefficient: float) -> dict:
     h_end = min(hh + 3, 23)
-    df = _fleet_frame(d, d, route, 0, 23)
+    df = _fleet_frame(d, d, list(route) if route else None, 0, 23, coefficient)
     cur = df[df.hour == hh]; nxt = df[(df.hour > hh) & (df.hour <= h_end)]
     def rec(x):
         return {"hour": int(x.hour), "prediction": round(float(x.prediction), 1), "lo": round(float(x.lo), 1), "hi": round(float(x.hi), 1),
@@ -696,6 +891,7 @@ def now(hour: int | None = Query(None, ge=0, le=23, description="час поль
                        "next": [rec(x) for x in g[(g.hour > hh) & (g.hour <= h_end)].itertuples()],
                        "day_total": round(float(g.prediction.sum()), 1), "day_passed": round(float(g[g.hour < hh].prediction.sum()), 1)})
     return {"mode": mode, "today": d, "hour": hh, "day_kind": _daykind(d), "data_until": FC.info.get("data_until"),
+            "coefficient_applied": coefficient,
             "network": {"now": round(float(cur.prediction.sum()), 1), "now_lo": round(float(cur.lo.sum()), 1), "now_hi": round(float(cur.hi.sum()), 1),
                         "next_hours": round(float(nxt.prediction.sum()), 1), "day_total": round(float(df.prediction.sum()), 1),
                         "day_passed": round(float(df[df.hour < hh].prediction.sum()), 1),
@@ -705,20 +901,35 @@ def now(hour: int | None = Query(None, ge=0, le=23, description="час поль
 
 @app.get("/alerts", tags=["Диспетчер"], summary="Предупреждения для диспетчера на текущий момент")
 def alerts(hour: int | None = Query(None, ge=0, le=23), date: str | None = Query(None), lookahead: int = Query(3, ge=1, le=12),
+           coefficient: float = Query(1.0, gt=0, le=3),
            user: str = Depends(current_user)) -> dict:
     d, hh, mode = _now(hour, date)
+    FC.get()
+    status_file = STATE / "refresh_status.json"
+    status_mtime = status_file.stat().st_mtime_ns if status_file.exists() else 0
+    return _alerts_cached(FC.version, d, hh, mode, lookahead, coefficient, status_mtime, user)
+
+
+@lru_cache(maxsize=256)
+def _alerts_cached(version: str, d: str, hh: int, mode: str, lookahead: int,
+                   coefficient: float, status_mtime: int, user: str) -> dict:
     out = []
     def add(level, kind, text, **kw):
         out.append({"level": level, "type": kind, "text": text, **kw})
-    df = _fleet_frame(d, d, None, 0, 23)
+    df = _fleet_frame(d, d, None, 0, 23, coefficient)
     win = df[(df.hour >= hh) & (df.hour <= min(hh + lookahead, 23))]
     for r, g in win[win.status == "риск переполнения"].groupby("route"):
         hrs = sorted(int(x) for x in g.hour)
-        add("критично", "переполнение", f"Маршрут {r}, {_hours_text(hrs)}: риск переполнения, рекомендуется +{int(g.veh_delta.max())} ваг.",
-            route=int(r), hours=hrs, veh_delta=int(g.veh_delta.max()))
+        delta = max(0, int(g.veh_delta.max()))
+        confidence = "высокая" if (g.lo / g.veh_typ.replace(0, np.nan) > g.bpv_p90).any() else "умеренная"
+        add("критично", "переполнение", f"Маршрут {r}, {_hours_text(hrs)}: риск повышенной нагрузки; добавить до {delta} ваг. к {hrs[0]}:00",
+            route=int(r), hours=hrs, veh_delta=delta, action=f"Добавить до {delta} вагонов к {hrs[0]}:00",
+            react_by=f"{d}T{hrs[0]:02d}:00:00+03:00", confidence=confidence,
+            passengers_at_risk=round(float(g.prediction.sum()), 1))
     for r, g in win[win.status == "повышенная"].groupby("route"):
         hrs = sorted(int(x) for x in g.hour)
-        add("внимание", "повышенная загрузка", f"Маршрут {r}, {_hours_text(hrs)}: повышенная загрузка", route=int(r), hours=hrs)
+        add("внимание", "повышенная загрузка", f"Маршрут {r}, {_hours_text(hrs)}: повышенная загрузка", route=int(r), hours=hrs,
+            action="Проверить выпуск и фактическую загрузку", confidence="умеренная", passengers_at_risk=round(float(g.prediction.sum()), 1))
     spare = win[(win.veh_delta <= -3) & (win.status == "норма")]
     for r, g in spare.groupby("route"):
         add("инфо", "избыток вагонов", f"Маршрут {r}, {_hours_text(sorted(int(x) for x in g.hour))}: загрузка низкая, можно снять до {int(-g.veh_delta.min())} ваг. без роста интервалов более чем в 1,7 раза",
@@ -736,7 +947,7 @@ def alerts(hour: int | None = Query(None, ge=0, le=23), date: str | None = Query
     if lag > 2:
         add("внимание", "данные", f"Последние фактические данные — {FC.info['data_until']}: прогноз на {lag} дн. вперёд, точность ниже (коридор шире)", days=lag)
     try:
-        st = json.loads((STATE / "refresh_status.json").read_text())
+        st = json.loads((STATE / "refresh_status.json").read_text(encoding="utf-8"))
         if not st.get("ok", True):
             add("критично", "пересчёт", f"Прогноз не обновился ({st.get('error', '')[:120]}); действует прошлая версия")
     except (FileNotFoundError, ValueError):
@@ -748,5 +959,61 @@ def alerts(hour: int | None = Query(None, ge=0, le=23), date: str | None = Query
     except Exception:
         pass
     order = {"критично": 0, "внимание": 1, "инфо": 2}
-    out.sort(key=lambda a: order[a["level"]])
-    return {"mode": mode, "today": d, "hour": hh, "count": len(out), "alerts": out}
+    for item in out:
+        key = f"{d}|{item['type']}|{item.get('route', '')}|{','.join(map(str, item.get('hours', [])))}"
+        item["id"] = hashlib.sha256(key.encode()).hexdigest()[:20]
+    out.sort(key=lambda a: (order[a["level"]], -a.get("passengers_at_risk", 0)))
+    return {"mode": mode, "today": d, "hour": hh, "coefficient_applied": coefficient,
+            "count": len(out), "alerts": out}
+
+
+class DecisionIn(BaseModel):
+    alert_id: str = Field(pattern=r"^[0-9a-f]{20}$")
+    alert_date: str
+    route: int | None = None
+    decision: Literal["accepted", "rejected", "postponed"]
+    comment: str = Field(default="", max_length=500)
+
+
+@app.post("/decisions", tags=["Диспетчер"], summary="Принять, отклонить или отложить предупреждение")
+def decision_save(body: DecisionIn, user: str = Depends(current_user)) -> dict:
+    try:
+        date = dt.date.fromisoformat(body.alert_date)
+    except ValueError:
+        raise HTTPException(400, "alert_date должна быть датой ГГГГ-ММ-ДД") from None
+    if body.route is not None and body.route not in ROUTES:
+        raise HTTPException(400, "неизвестный маршрут")
+    return save_decision(body.alert_id, user, body.decision, body.comment.strip(), date.isoformat(), body.route)
+
+
+@app.get("/decisions", tags=["Диспетчер"], summary="Журнал решений текущего пользователя")
+def decisions(limit: int = Query(100, ge=1, le=500), user: str = Depends(current_user)) -> dict:
+    rows = list_decisions(user, limit)
+    return {"count": len(rows), "rows": rows,
+            "summary": {kind: sum(r["decision"] == kind for r in rows) for kind in ("accepted", "rejected", "postponed")},
+            "note": "журнал фиксирует решение диспетчера; фактическое выполнение и эффект отдельно не подтверждены"}
+
+
+@lru_cache(maxsize=8)
+def _decision_facts(stamp: tuple) -> pd.DataFrame:
+    files = [Path(path) for path, _, _ in stamp]
+    if not files:
+        return pd.DataFrame(columns=["route", "date", "boardings"])
+    facts = pd.concat([pd.read_csv(f, sep=";", usecols=["route", "date", "boardings"]) for f in files], ignore_index=True)
+    return facts.groupby(["route", "date"], as_index=False).boardings.sum()
+
+
+@app.get("/decisions/report", tags=["Диспетчер"], summary="Решения и спрос после поступления фактов")
+def decisions_report(user: str = Depends(current_user)) -> dict:
+    rows = list_decisions(user, 500)
+    stamp = tuple(sorted((str(f), f.stat().st_mtime_ns, f.stat().st_size)
+                         for d in HIST_DIRS if d.exists() for f in d.glob("*.csv")))
+    facts = _decision_facts(stamp)
+    by_route = {(int(x.route), str(x.date)): float(x.boardings) for x in facts.itertuples()}
+    by_day = facts.groupby("date").boardings.sum().to_dict() if not facts.empty else {}
+    for row in rows:
+        row["factual_boardings"] = (by_route.get((int(row["route"]), row["alert_date"])) if row["route"] is not None
+                                      else by_day.get(row["alert_date"]))
+    return {"count": len(rows), "with_fact": sum(r["factual_boardings"] is not None for r in rows), "rows": rows,
+            "summary": {kind: sum(r["decision"] == kind for r in rows) for kind in ("accepted", "rejected", "postponed")},
+            "note": "факт — число посадок после решения, не доказательство выполнения рекомендации или её причинного эффекта"}

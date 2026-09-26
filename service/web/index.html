@@ -198,6 +198,7 @@ header{
   <div class="status-strip">
     <div class="status-item"><span class="dot" id="apiDot"></span><span id="apiStatus">подключение…</span></div>
     <div class="status-item">Модель v7 · WAPE-score <b style="color:var(--green)">0.884</b></div>
+    <div class="status-item"><a href="/dispatcher.html" style="color:var(--accent2)">Рабочее место диспетчера →</a></div>
     <div class="status-item" id="dataUntil"></div>
     <div class="status-item user-strip" id="userStrip"></div>
     <div class="status-item clock" id="clock">--:--:--</div>
@@ -240,6 +241,11 @@ header{
     <div class="map-title-bar">
       <div class="badge">Москва · трамвайная сеть · <b id="mapPeriodLabel">01.11.2025</b></div>
     </div>
+    <div style="position:absolute;left:12px;bottom:28px;z-index:5;background:#172532;color:#e9f2f8;padding:10px;border-radius:8px">
+      <label for="mapHour">Час на карте: <b id="mapHourLabel">08:00</b></label>
+      <input id="mapHour" type="range" min="0" max="23" value="8" style="display:block;width:190px">
+      <small>Остановки — оценка, не измеренный факт</small>
+    </div>
     <div class="map-legend">
       <div style="font-size:10px;color:var(--text-dim-map);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Толщина линии = загрузка</div>
       <div class="lg-row"><span class="lg-bar" style="height:2px;background:#555"></span>низкая</div>
@@ -256,12 +262,13 @@ header{
       <div class="kpi"><div class="kpi-label">Посадок за период</div><div class="kpi-val accent" id="kpiTotal">—</div></div>
       <div class="kpi"><div class="kpi-label">Маршрутов активно</div><div class="kpi-val blue" id="kpiRoutes">9</div></div>
       <div class="kpi"><div class="kpi-label">Пиковый час</div><div class="kpi-val" id="kpiPeak">—</div></div>
-      <div class="kpi"><div class="kpi-label">latency API (p95)</div><div class="kpi-val" style="color:var(--green)">22 мс</div></div>
+      <div class="kpi"><div class="kpi-label">План выпуска</div><div class="kpi-val"><a href="/dispatcher.html" style="color:var(--green);font-size:14px">Открыть →</a></div></div>
     </div>
 
     <div class="chart-card">
       <h3>Почасовая динамика</h3>
       <div class="chart-box"><canvas id="hourChart"></canvas></div>
+      <div class="slider-hint">Заливка — ориентировочный коридор 80 %; при выборе нескольких маршрутов границы суммируются и отдельно не калиброваны.</div>
     </div>
 
     <div class="chart-card">
@@ -289,7 +296,7 @@ header{
 
     <div class="footer-note">
       API: <span id="apiUrlLabel" style="font-family:var(--mono)"></span><br>
-      Нагрузочный тест: ≈ 1 030 RPS при загрузке CPU ~60 %, p95 22 мс (4 vCPU / 4 воркера, с авторизацией); насыщение ≈ 1 050 RPS — локальный бенчмарк locust.</div>
+      Нагрузочный тест с коридором: ≈ 995 RPS при загрузке CPU ~75 %, p95 40 мс (4 vCPU / 4 воркера); локальный 30-секундный бенчмарк Locust.</div>
   </div>
 
 </div>
@@ -300,7 +307,8 @@ header{
 // знать порт API снаружи контейнера. При локальном запуске без Docker
 // (просто "python -m http.server" рядом с "uvicorn main:app --port 8123")
 // прокси нет, поэтому бьём напрямую в порт API.
-const API_BASE = window.location.port === "8080" ? "/api" : "http://127.0.0.1:8123";
+const API_BASE = (!["localhost","127.0.0.1"].includes(location.hostname) || ["","8080","80","443"].includes(location.port))
+  ? "/api" : "http://127.0.0.1:8123";
 
 // ---- авторизация (прототип): OAuth2 Password Flow → JWT, токен в localStorage ----
 let TOKEN = localStorage.getItem("edc_token") || "";
@@ -479,7 +487,9 @@ Chart.defaults.font.size = 10;
 const hourChart = new Chart(document.getElementById("hourChart"), {
   type: "line",
   data: { labels: [], datasets: [{ label: "Посадки", data: [], borderColor: "#00c2ff",
-    backgroundColor: "rgba(0,194,255,.1)", fill: true, tension: .3, pointRadius: 0 }] },
+    backgroundColor: "rgba(0,194,255,.1)", fill: false, tension: .3, pointRadius: 0 },
+    {label:"Нижняя граница 80 %",data:[],borderColor:"transparent",pointRadius:0},
+    {label:"Верхняя граница 80 %",data:[],borderColor:"transparent",backgroundColor:"rgba(0,194,255,.16)",fill:"-1",pointRadius:0}] },
   options: { responsive:true, maintainAspectRatio:false,
     plugins:{legend:{display:false}},
     scales:{ x:{grid:{color:"#22303c"}}, y:{grid:{color:"#22303c"}, beginAtZero:true } } }
@@ -629,6 +639,15 @@ async function whenStyleReady() {
     }
   });
 
+  map.addSource("stop-demand", {type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  map.addLayer({id:"stop-demand-points",type:"circle",source:"stop-demand",paint:{
+    "circle-radius":["interpolate",["linear"],["get","prediction"],0,3,500,9,1500,16],
+    "circle-color":"#ff5a1f","circle-opacity":0.72,"circle-stroke-color":"#fff","circle-stroke-width":1
+  }});
+  map.on("click","stop-demand-points",e=>{const p=e.features[0].properties,el=document.createElement("div");
+    el.textContent=`${p.name}: примерно ${Math.round(p.prediction)} посадок за час`;
+    new maplibregl.Popup().setLngLat(e.lngLat).setDOMContent(el).addTo(map)});
+
   map.on("click", "routes-line", (e) => {
     const p = e.features[0].properties;
     new maplibregl.Popup()
@@ -641,6 +660,7 @@ async function whenStyleReady() {
 
   // Первичная перекраска, если /forecast уже успел ответить к этому моменту.
   recolorRoutes();
+  loadMapHour();
 
   // WebGL-канвас иногда не перерисовывается сам после программного resize()
   // (зависит от драйвера/композитора хоста) — форсируем несколько кадров
@@ -698,20 +718,26 @@ async function refresh(){
 
   // hour/time chart
   if(granularity === "hour"){
-    const byHour = {};
-    for(const row of data.rows){ byHour[row.hour] = (byHour[row.hour]||0) + row.prediction; }
+    const byHour = {}, byHourLo={}, byHourHi={};
+    for(const row of data.rows){ byHour[row.hour] = (byHour[row.hour]||0) + row.prediction;
+      byHourLo[row.hour]=(byHourLo[row.hour]||0)+row.lo;byHourHi[row.hour]=(byHourHi[row.hour]||0)+row.hi; }
     const hours = Array.from({length:24},(_,i)=>i);
     hourChart.data.labels = hours.map(h=>h+":00");
     hourChart.data.datasets[0].data = hours.map(h=>byHour[h]||0);
+    hourChart.data.datasets[1].data = hours.map(h=>byHourLo[h]||0);
+    hourChart.data.datasets[2].data = hours.map(h=>byHourHi[h]||0);
     hourChart.data.datasets[0].label = "Посадки по часам";
     const peakHour = hours.reduce((a,b)=>(byHour[a]||0)>(byHour[b]||0)?a:b);
     document.getElementById("kpiPeak").textContent = peakHour + ":00";
   } else {
-    const byDate = {};
-    for(const row of data.rows){ byDate[row.date] = (byDate[row.date]||0) + row.prediction; }
+    const byDate = {}, byDateLo={}, byDateHi={};
+    for(const row of data.rows){ byDate[row.date] = (byDate[row.date]||0) + row.prediction;
+      byDateLo[row.date]=(byDateLo[row.date]||0)+row.lo;byDateHi[row.date]=(byDateHi[row.date]||0)+row.hi; }
     const dates = Object.keys(byDate).sort();
     hourChart.data.labels = dates.map(d=>fmtDateShort(d));
     hourChart.data.datasets[0].data = dates.map(d=>byDate[d]);
+    hourChart.data.datasets[1].data = dates.map(d=>byDateLo[d]);
+    hourChart.data.datasets[2].data = dates.map(d=>byDateHi[d]);
     hourChart.data.datasets[0].label = "Посадки по дням";
     const peakDate = dates.reduce((a,b)=>byDate[a]>byDate[b]?a:b, dates[0]);
     document.getElementById("kpiPeak").textContent = peakDate ? fmtDateShort(peakDate) : "—";
@@ -720,6 +746,29 @@ async function refresh(){
 
   window.__lastByRoute = byRoute;
   recolorRoutes();
+  loadMapHour();
+}
+
+let mapHourRequest = 0;
+document.getElementById("mapHour").onchange = loadMapHour;
+async function loadMapHour(){
+  if(!TOKEN || !map.getSource("stop-demand")) return;
+  const seq=++mapHourRequest, hour=Number(document.getElementById("mapHour").value);
+  document.getElementById("mapHourLabel").textContent=String(hour).padStart(2,"0")+":00";
+  const date=document.getElementById("dateFrom").value;
+  const p=new URLSearchParams({date_from:date,date_to:date,hour_from:hour,hour_to:hour,coefficient:currentCoef});
+  for(const r of activeRoutes)p.append("route",r);
+  try{
+    const [forecast,stops]=await Promise.all([
+      apiFetch(`${API_BASE}/forecast?${p}`).then(r=>r.json()),
+      apiFetch(`${API_BASE}/forecast/stops?${p}`).then(r=>r.json())]);
+    if(seq!==mapHourRequest || !forecast.rows || !stops.rows)return;
+    window.__lastByRoute=Object.fromEntries(forecast.rows.map(x=>[x.route,x.prediction]));
+    recolorRoutes();
+    map.getSource("stop-demand").setData({type:"FeatureCollection",features:stops.rows.map(x=>({
+      type:"Feature",geometry:{type:"Point",coordinates:[x.lon,x.lat]},
+      properties:{name:x.stop_name,prediction:x.prediction,stop:x.stop}}))});
+  }catch(e){console.warn("Остановки за час недоступны",e)}
 }
 
 function recolorRoutes(){

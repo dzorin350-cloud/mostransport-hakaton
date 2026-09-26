@@ -12,13 +12,13 @@ import hmac
 import os
 import re
 import secrets
-import sqlite3
 from pathlib import Path
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
+from store import add_user, get_user
 
 AUTH_DIR = Path(os.environ.get("AUTH_DIR", "/app/auth"))
 TOKEN_TTL_H = float(os.environ.get("TOKEN_TTL_HOURS", "12"))
@@ -45,13 +45,6 @@ DEMO_USER = os.environ.get("DEMO_USER", "demo")
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "demo2025")
 
 
-def _db() -> sqlite3.Connection:
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(AUTH_DIR / "users.db", timeout=10)
-    con.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, salt BLOB, hash BLOB, created_at TEXT)")
-    return con
-
-
 def _hash(password: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
 
@@ -61,8 +54,7 @@ def _seed_demo() -> None:
     if not DEMO_USER:
         return
     salt = secrets.token_bytes(16)
-    with _db() as con:
-        con.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?)", (DEMO_USER.lower(), salt, _hash(DEMO_PASSWORD, salt), dt.datetime.utcnow().isoformat()))
+    add_user(DEMO_USER.lower(), salt, _hash(DEMO_PASSWORD, salt))
 
 
 _seed_demo()
@@ -81,19 +73,15 @@ def register(body: RegisterIn) -> dict:
     if len(body.password) < 6:
         raise HTTPException(400, "пароль должен быть не короче 6 символов")
     salt = secrets.token_bytes(16)
-    with _db() as con:
-        try:
-            con.execute("INSERT INTO users VALUES (?,?,?,?)", (u, salt, _hash(body.password, salt), dt.datetime.utcnow().isoformat()))
-        except sqlite3.IntegrityError:
-            raise HTTPException(409, "пользователь с таким логином уже зарегистрирован") from None
+    if not add_user(u, salt, _hash(body.password, salt)):
+        raise HTTPException(409, "пользователь с таким логином уже зарегистрирован")
     return {"username": u, "message": "пользователь зарегистрирован"}
 
 
 @router.post("/token", summary="Вход: логин и пароль → токен (OAuth2 Password Flow)")
 def token(form: OAuth2PasswordRequestForm = Depends()) -> dict:
     u = form.username.strip().lower()
-    with _db() as con:
-        row = con.execute("SELECT salt, hash FROM users WHERE username=?", (u,)).fetchone()
+    row = get_user(u)
     if not row or not hmac.compare_digest(_hash(form.password, row[0]), row[1]):
         raise HTTPException(401, "неверный логин или пароль", headers={"WWW-Authenticate": "Bearer"})
     exp = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=TOKEN_TTL_H)
