@@ -8,8 +8,9 @@
 **Веб-сервис** (REST API + дашборд с картой, требование ТЗ п.3–4) — в
 [`service/`](service/README.md). Быстрый старт: `cd service && docker
 compose up -d --build`, дашборд на http://localhost:8080. Нагрузочный тест:
-885 RPS, p95 190 мс на 4 vCPU / 4 ГБ и 610 RPS, p95 280 мс на 2 vCPU / 2 ГБ
-(подробности в `service/README.md`).
+1 282 RPS, p95 68 мс на 4 vCPU / 4 ГБ и 890 RPS на 2 vCPU / 2 ГБ
+(подробности в `service/README.md`). Сервис сам применяет модель и сам скачивает внешние данные —
+[`service/engine/README.md`](service/engine/README.md). Все прогоны и тесты — [`docs/TESTS.md`](docs/TESTS.md).
 
 **Для фронтенда:** что учитывает модель и что показывать пользователю — [`service/FRONTEND_NOTES.md`](service/FRONTEND_NOTES.md).
 
