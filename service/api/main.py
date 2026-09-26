@@ -407,3 +407,51 @@ def ingest_validations(body: str = Body(..., media_type="text/csv"), user: str =
     out = _store(df, "validations", user)
     out.update({"строк_во_входе": n_all, "успешных_валидаций": int(ok.sum())})
     return out
+
+
+# --------------------------------------------------------------------------
+# Остановки: ОЦЕНОЧНАЯ разбивка прогноза маршрута по остановкам (GTFS data.mos.ru, engine/build_stops.py)
+# --------------------------------------------------------------------------
+STOPS_PATH = Path(os.environ.get("STOPS_PATH", "/app/service/engine/artifacts/stops.csv"))
+STOPS = pd.read_csv(STOPS_PATH) if STOPS_PATH.exists() else None
+STOPS_NOTE = ("оценочная разбивка: пассажиропотока по остановкам в данных нет; прогноз маршрута распределён по остановкам "
+              "расписания GTFS (data.mos.ru) с весами по пересадочности; сумма по остановкам = прогнозу маршрута")
+
+
+@app.get("/stops", tags=["Остановки"], summary="Остановки маршрутов (GeoJSON) для карты")
+def stops(route: list[int] | None = Query(None), user: str = Depends(current_user)) -> dict:
+    if STOPS is None:
+        raise HTTPException(503, "справочник остановок не загружен")
+    x = STOPS if not route else STOPS[STOPS.route.isin(route)]
+    feats = []
+    for (stop, name, lat, lon), g in x.groupby(["stop", "stop_name", "lat", "lon"]):
+        feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                      "properties": {"stop": str(stop), "name": name, "routes": sorted(int(r) for r in g.route.unique())}})
+    return {"type": "FeatureCollection", "features": feats, "note": STOPS_NOTE}
+
+
+@app.get("/forecast/stops", tags=["Остановки"], summary="Прогноз посадок по остановкам (оценочная разбивка)")
+def forecast_stops(
+    date_from: str = Query(..., description="YYYY-MM-DD"),
+    date_to: str = Query(..., description="YYYY-MM-DD"),
+    route: list[int] | None = Query(None),
+    hour_from: int = Query(0, ge=0, le=23),
+    hour_to: int = Query(23, ge=0, le=23),
+    coefficient: float = Query(1.0, gt=0, le=3.0),
+    user: str = Depends(current_user),
+) -> dict:
+    if STOPS is None:
+        raise HTTPException(503, "справочник остановок не загружен")
+    src, mask = _slice(date_from, date_to)
+    mask &= (src["hour"] >= hour_from) & (src["hour"] <= hour_to)
+    if route:
+        mask &= src["route"].isin(route)
+    tot = (src[mask].groupby("route")["prediction"].sum() * coefficient)
+    x = STOPS[STOPS.route.isin(tot.index)].copy()
+    x["prediction"] = (x["share"] * x["route"].map(tot)).round(1)
+    by_stop = (x.groupby(["stop", "stop_name", "lat", "lon"], as_index=False)
+                .agg(prediction=("prediction", "sum"), routes=("route", lambda s: sorted({int(r) for r in s})))
+                .sort_values("prediction", ascending=False))
+    rows = by_stop.assign(stop=by_stop["stop"].astype(str)).to_dict(orient="records")
+    return {"count": len(rows), "total_prediction": round(float(tot.sum()), 1), "note": STOPS_NOTE,
+            "data_until": FC.info.get("data_until"), "rows": rows}

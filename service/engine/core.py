@@ -32,6 +32,8 @@ log = logging.getLogger("engine")
 HERE = Path(__file__).resolve().parent
 FEATS = ["route", "hour", "dow", "off", "hol_wd", "pre", "post"]
 COVID = pd.period_range("2020-03", "2021-06", freq="M")
+RAIN_EFFECT = -0.025      # сильно дождливый день (3+ дневных срока с осадками): −2…−3 % посадок (бэктест: +0,65 пункта на таких днях)
+RAIN_SLOTS = 3
 SHAPE_ALPHA = 0.5          # доля формы дня «тот же месяц год назад» (годовая модель, бэктест +1,2 пункта)
 HORIZON_MONTHS = 12
 
@@ -225,6 +227,13 @@ class Engine:
             norm = mix.groupby([Fb.route, Fb.date]).transform("sum")
             Fb.loc[ok, "prediction"] = (day * mix / norm)[ok]
 
+        # поправка на сильный дождь по прогнозу погоды (только ближайшие дни, где прогноз есть; сухие дни не меняются)
+        rain_slots, rain_status = sources.fetch_rain_forecast(timeout=15 if self.fetch else 0.001)
+        heavy = sorted(d for d, n in rain_slots.items() if n >= RAIN_SLOTS and h_start <= d <= h_end)
+        if heavy:
+            m = Fb.date.dt.date.isin(set(heavy))
+            Fb.loc[m, "prediction"] = Fb.loc[m, "prediction"] * (1 + RAIN_EFFECT)
+
         out = Fb[["route", "date", "hour", "prediction"]].copy()
         zero_routes = [r for r in self.routes_all if r not in self.config["routes_model"]]
         if zero_routes:
@@ -244,8 +253,10 @@ class Engine:
             "year_shape_months": blended_months,
             "year_shape_alpha": SHAPE_ALPHA,
             "cleaned_route_days": int(flags.m.sum()),
+            "rain_adjusted_days": [str(d) for d in heavy],
+            "rain_effect": RAIN_EFFECT,
             "route_levels_per_day": {int(k): round(float(v), 1) for k, v in L.items()},
-            "sources": {"calendar": cal_status, "ridership": rid_status},
+            "sources": {"calendar": cal_status, "ridership": rid_status, "rain_forecast": rain_status},
             "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "compute_seconds": round(time.perf_counter() - t0, 1),
         }

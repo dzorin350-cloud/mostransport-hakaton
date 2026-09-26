@@ -40,6 +40,7 @@ curl -H "$H" "$B/forecast?date_from=2025-11-01&date_to=2025-11-30&granularity=da
 curl -H "$H" "$B/forecast?date_from=2025-11-01&date_to=2026-10-31&granularity=month&route=17" # год по месяцам
 curl -H "$H" "$B/forecast?date_from=2025-11-10&date_to=2025-11-16&granularity=week&coefficient=0.96"
 curl -H "$H" -o forecast.xlsx "$B/forecast/export?date_from=2025-11-01&date_to=2025-11-07&fmt=xlsx"
+curl -H "$H" "$B/forecast/stops?date_from=2025-11-12&date_to=2025-11-12&route=17&hour_from=7&hour_to=9"  # по остановкам
 curl -H "$H" "$B/forecast?date_from=2027-01-01&date_to=2027-01-02"                            # вне горизонта → понятная ошибка
 ```
 
@@ -51,6 +52,7 @@ curl -H "$H" "$B/forecast?date_from=2027-01-01&date_to=2027-01-02"              
 | `GET /model/info` | дата данных, горизонт, множители, источники внешних данных и их статус |
 | `POST /ingest/hourly` | почасовые посадки CSV `route;date;hour;boardings` |
 | `POST /ingest/validations` | сырые валидации в формате `train.csv`, агрегация на стороне сервиса |
+| `GET /stops`, `GET /forecast/stops` | остановки и прогноз по остановкам (оценочная разбивка по расписанию GTFS) |
 | `GET /routes`, `GET /routes/geometry` | маршруты и их геометрия (OpenStreetMap) |
 | `GET /health`, `GET /metrics` | состояние сервиса (без авторизации) |
 

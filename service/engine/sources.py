@@ -128,3 +128,20 @@ def fetch_ridership(cutoff: dt.date, cache_dir: Path, timeout: float = 20) -> tu
     last = f"{int(d.year.iloc[-1])}-{int(d.month.iloc[-1]):02d}"
     return d, {"source": "data.mos.ru/opendata/62521", "origin": src, "rows_total": n_all,
                "rows_used": len(d), "last_month_used": last, "cutoff": str(cutoff), "fetched_at": _now()}
+
+
+# --------------------------------------------------------------------------- прогноз погоды
+def fetch_rain_forecast(timeout: float = 15) -> tuple[dict, dict]:
+    """Прогноз осадков на 16 дней (Open-Meteo, без ключа) → {дата: число дневных сроков 6,9,12,15,18,21 ч с осадками ≥ 0,1 мм}.
+    Мера та же, что при оценке эффекта по метеостанции Москва-ВДНХ (число дневных сроков с дождём)."""
+    url = ("https://api.open-meteo.com/v1/forecast?latitude=55.83&longitude=37.63&hourly=precipitation"
+           "&timezone=Europe%2FMoscow&forecast_days=16")
+    try:
+        h = json.loads(_get(url, timeout))["hourly"]
+        df = pd.DataFrame({"t": pd.to_datetime(h["time"]), "p": h["precipitation"]})
+        df = df[df.t.dt.hour.isin([6, 9, 12, 15, 18, 21])]
+        slots = (df.p.fillna(0) >= 0.1).groupby(df.t.dt.date).sum().astype(int).to_dict()
+        return slots, {"source": "open-meteo.com (прогноз)", "origin": "live", "days": len(slots), "fetched_at": _now()}
+    except Exception as exc:
+        log.warning("прогноз погоды недоступен: %s", exc)
+        return {}, {"source": "open-meteo.com (прогноз)", "origin": "недоступен", "error": str(exc)[:200], "fetched_at": _now()}

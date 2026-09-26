@@ -63,6 +63,8 @@ docker compose -f docker-compose.yml -f docker-compose.2cpu.yml up -d --build
 | `POST /auth/register` | регистрация: `{"username": ..., "password": ...}` |
 | `POST /auth/token` | вход (форма `username`, `password`) → `access_token`; дальше заголовок `Authorization: Bearer <токен>` |
 | `GET /auth/me` | текущий пользователь |
+| `GET /stops` | остановки маршрутов (GeoJSON) для карты |
+| `GET /forecast/stops` | прогноз по остановкам за период (**оценочная** разбивка прогноза маршрута по расписанию GTFS) |
 | `POST /ingest/validations` | сырые валидации в формате `train.csv` (CSV, «;»), сервис агрегирует по маршруту и часу |
 | `POST /ingest/hourly` | почасовые посадки CSV `route;date;hour;boardings` |
 | `GET /health` | статус сервиса |
