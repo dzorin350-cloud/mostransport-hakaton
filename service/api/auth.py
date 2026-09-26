@@ -1,0 +1,104 @@
+"""Прототип авторизации: регистрация и вход по OAuth2 Password Flow, токен JWT.
+
+Пользователи — SQLite (AUTH_DIR/users.db, том Docker). Пароли — PBKDF2-SHA256 с солью.
+Секрет JWT — переменная AUTH_SECRET или файл AUTH_DIR/jwt_secret, создаётся один раз и общий для всех воркеров.
+Это прототип для демонстрации, а не промышленная система доступа (нет ролей, сброса пароля, ограничения попыток).
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import hmac
+import os
+import re
+import secrets
+import sqlite3
+from pathlib import Path
+
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+
+AUTH_DIR = Path(os.environ.get("AUTH_DIR", "/app/auth"))
+TOKEN_TTL_H = float(os.environ.get("TOKEN_TTL_HOURS", "12"))
+ALGO = "HS256"
+router = APIRouter(prefix="/auth", tags=["Авторизация"])
+oauth2 = OAuth2PasswordBearer(tokenUrl="auth/token", auto_error=False)
+
+
+def _secret() -> str:
+    if os.environ.get("AUTH_SECRET"):
+        return os.environ["AUTH_SECRET"]
+    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    f = AUTH_DIR / "jwt_secret"
+    try:                                     # создаётся ровно один раз, даже если воркеры стартуют одновременно
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(fd, secrets.token_hex(32).encode()); os.close(fd)
+    except FileExistsError:
+        pass
+    return f.read_text().strip()
+
+
+SECRET = _secret()
+
+
+def _db() -> sqlite3.Connection:
+    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(AUTH_DIR / "users.db", timeout=10)
+    con.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, salt BLOB, hash BLOB, created_at TEXT)")
+    return con
+
+
+def _hash(password: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
+
+
+class RegisterIn(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/register", status_code=201, summary="Регистрация пользователя")
+def register(body: RegisterIn) -> dict:
+    u = body.username.strip().lower()
+    if not re.fullmatch(r"[a-z0-9_.@-]{3,64}", u):
+        raise HTTPException(400, "логин: 3–64 символа, латиница, цифры и . _ @ -")
+    if len(body.password) < 6:
+        raise HTTPException(400, "пароль должен быть не короче 6 символов")
+    salt = secrets.token_bytes(16)
+    with _db() as con:
+        try:
+            con.execute("INSERT INTO users VALUES (?,?,?,?)", (u, salt, _hash(body.password, salt), dt.datetime.utcnow().isoformat()))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "пользователь с таким логином уже зарегистрирован") from None
+    return {"username": u, "message": "пользователь зарегистрирован"}
+
+
+@router.post("/token", summary="Вход: логин и пароль → токен (OAuth2 Password Flow)")
+def token(form: OAuth2PasswordRequestForm = Depends()) -> dict:
+    u = form.username.strip().lower()
+    with _db() as con:
+        row = con.execute("SELECT salt, hash FROM users WHERE username=?", (u,)).fetchone()
+    if not row or not hmac.compare_digest(_hash(form.password, row[0]), row[1]):
+        raise HTTPException(401, "неверный логин или пароль", headers={"WWW-Authenticate": "Bearer"})
+    exp = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=TOKEN_TTL_H)
+    return {"access_token": jwt.encode({"sub": u, "exp": exp}, SECRET, algorithm=ALGO), "token_type": "bearer",
+            "expires_in": int(TOKEN_TTL_H * 3600)}
+
+
+def current_user(tok: str | None = Depends(oauth2)) -> str:
+    if not tok:
+        raise HTTPException(401, "нужна авторизация: войдите и передайте токен в заголовке Authorization: Bearer …",
+                            headers={"WWW-Authenticate": "Bearer"})
+    try:
+        return jwt.decode(tok, SECRET, algorithms=[ALGO])["sub"]
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "срок действия токена истёк, войдите заново", headers={"WWW-Authenticate": "Bearer"}) from None
+    except jwt.PyJWTError:
+        raise HTTPException(401, "неверный токен, войдите заново", headers={"WWW-Authenticate": "Bearer"}) from None
+
+
+@router.get("/me", summary="Текущий пользователь")
+def me(user: str = Depends(current_user)) -> dict:
+    return {"username": user}

@@ -55,8 +55,16 @@ docker compose -f docker-compose.yml -f docker-compose.2cpu.yml up -d --build
 
 ## API
 
+Данные отдаются только авторизованным пользователям (прототип: OAuth2 Password Flow, токен JWT, пользователи в SQLite
+в томе `auth`). Без токена открыты `/health`, `/metrics`, `/docs`. Ошибки возвращаются с понятными сообщениями на русском.
+
 | Эндпоинт | Что делает |
 |---|---|
+| `POST /auth/register` | регистрация: `{"username": ..., "password": ...}` |
+| `POST /auth/token` | вход (форма `username`, `password`) → `access_token`; дальше заголовок `Authorization: Bearer <токен>` |
+| `GET /auth/me` | текущий пользователь |
+| `POST /ingest/validations` | сырые валидации в формате `train.csv` (CSV, «;»), сервис агрегирует по маршруту и часу |
+| `POST /ingest/hourly` | почасовые посадки CSV `route;date;hour;boardings` |
 | `GET /health` | статус сервиса |
 | `GET /metrics` | счётчики запросов, средняя латентность, версия модели, дата данных |
 | `GET /model/info` | как построен прогноз: дата данных, горизонт, множители месяцев, месяцы с годовой формой дня, источники внешних данных (`live` / `cache` / `fallback`), время расчёта |
@@ -65,10 +73,13 @@ docker compose -f docker-compose.yml -f docker-compose.2cpu.yml up -d --build
 | `GET /forecast` | прогноз с фильтрами: `date_from`, `date_to`, `route[]`, `hour_from/to`, `granularity=hour\|day\|week\|month`, `coefficient` |
 | `GET /forecast/export` | то же самое, отдаёт файл `fmt=csv\|xlsx` |
 
-Пример:
+Приём данных: только даты после текущей даты данных; файлы сохраняются в том `ingest`, движок подхватывает их за ~1 минуту
+и сдвигает горизонт.
+
+Пример (полный сценарий с авторизацией — [`../docs/JURY.md`](../docs/JURY.md)):
 
 ```bash
-curl "http://localhost:8123/forecast?date_from=2025-11-01&date_to=2025-11-07&route=17&granularity=day&coefficient=1.1"
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8123/forecast?date_from=2025-11-01&date_to=2025-11-07&route=17&granularity=day&coefficient=1.1"
 ```
 
 Горизонт — 12 месяцев от даты последних данных (сейчас 01.11.2025 – 31.10.2026); запрос вне горизонта
@@ -104,7 +115,16 @@ curl "http://localhost:8123/forecast?date_from=2025-11-01&date_to=2025-11-07&rou
 
 ## Производительность
 
-Полные таблицы всех прогонов — [`../docs/TESTS.md`](../docs/TESTS.md) §5. Текущий бэкенд (движок), 200 пользователей, 0 ошибок:
+Полные таблицы всех прогонов — [`../docs/TESTS.md`](../docs/TESTS.md) §5.
+
+**Итог (с авторизацией, 4 vCPU / 4 ГБ, 4 воркера, 0 ошибок):**
+
+| Режим | Пользователей | RPS | p95, мс | CPU, % лимита | Память | Swap |
+|---|---|---|---|---|---|---|
+| Рабочая точка по ТЗ (CPU 60–80 %) | 145 | **1 030** | **22** | 59–62 | 1,0 ГБ из 4 | 0 |
+| Насыщение | 200 | 1 053 | 180 | 102 | 1,0 ГБ | 0 |
+
+Замеры движка до добавления авторизации, 200 пользователей, 0 ошибок:
 
 | Конфигурация | RPS | p50, мс | p95, мс | p99, мс | Память |
 |---|---|---|---|---|---|

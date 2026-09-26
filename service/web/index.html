@@ -152,9 +152,40 @@ header{
   .layout{grid-template-columns:1fr}
   .panel:first-child, .panel:last-child{display:none}
 }
+/* ---- авторизация (прототип) ---- */
+#authOverlay{position:fixed; inset:0; z-index:1000; background:rgba(5,8,12,.92); display:flex; align-items:center; justify-content:center}
+#authOverlay.hidden{display:none}
+.auth-card{width:340px; background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:26px 24px}
+.auth-card h2{font-size:18px; margin-bottom:4px}
+.auth-card .sub{color:var(--text-dim); font-size:12px; margin-bottom:18px}
+.auth-tabs{display:flex; gap:6px; margin-bottom:16px}
+.auth-tabs button{flex:1; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--panel2); color:var(--text-dim); cursor:pointer}
+.auth-tabs button.active{background:var(--accent2); color:#06131a; border-color:var(--accent2); font-weight:700}
+.auth-card input{width:100%; padding:10px 12px; margin-bottom:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:14px}
+.auth-card .submit{width:100%; padding:10px; border:none; border-radius:6px; background:var(--accent); color:#fff; font-weight:700; cursor:pointer; font-size:14px}
+.auth-msg{min-height:18px; font-size:12px; margin-top:10px; color:var(--red)}
+.auth-msg.ok{color:var(--green)}
+.user-strip a{color:var(--accent2); cursor:pointer; margin-left:6px}
 </style>
 </head>
 <body>
+
+<!-- Авторизация: открывается первой, без токена данные не запрашиваются -->
+<div id="authOverlay">
+  <form class="auth-card" id="authForm">
+    <h2>Единый диспетчерский центр</h2>
+    <div class="sub">Прогноз пассажиропотока трамваев · вход в систему</div>
+    <div class="auth-tabs">
+      <button type="button" id="tabLogin" class="active">Вход</button>
+      <button type="button" id="tabReg">Регистрация</button>
+    </div>
+    <input id="authUser" autocomplete="username" placeholder="Логин (латиница, от 3 символов)" required>
+    <input id="authPass" type="password" autocomplete="current-password" placeholder="Пароль (от 6 символов)" required>
+    <input id="authPass2" type="password" autocomplete="new-password" placeholder="Повторите пароль" style="display:none">
+    <button class="submit" id="authSubmit" type="submit">Войти</button>
+    <div class="auth-msg" id="authMsg"></div>
+  </form>
+</div>
 
 <header>
   <div class="brand">
@@ -167,6 +198,8 @@ header{
   <div class="status-strip">
     <div class="status-item"><span class="dot" id="apiDot"></span><span id="apiStatus">подключение…</span></div>
     <div class="status-item">Модель v7 · WAPE-score <b style="color:var(--green)">0.884</b></div>
+    <div class="status-item" id="dataUntil"></div>
+    <div class="status-item user-strip" id="userStrip"></div>
     <div class="status-item clock" id="clock">--:--:--</div>
   </div>
 </header>
@@ -223,7 +256,7 @@ header{
       <div class="kpi"><div class="kpi-label">Посадок за период</div><div class="kpi-val accent" id="kpiTotal">—</div></div>
       <div class="kpi"><div class="kpi-label">Маршрутов активно</div><div class="kpi-val blue" id="kpiRoutes">9</div></div>
       <div class="kpi"><div class="kpi-label">Пиковый час</div><div class="kpi-val" id="kpiPeak">—</div></div>
-      <div class="kpi"><div class="kpi-label">latency API (p95)</div><div class="kpi-val" style="color:var(--green)">190 мс</div></div>
+      <div class="kpi"><div class="kpi-label">latency API (p95)</div><div class="kpi-val" style="color:var(--green)">22 мс</div></div>
     </div>
 
     <div class="chart-card">
@@ -243,7 +276,7 @@ header{
       <div class="slider-hint">Погода, событие, сезонная поправка — без переобучения модели</div>
     </div>
     <div class="preset-row">
-      <button class="preset-btn coef-preset" data-coef="0.85">Дождь</button>
+      <button class="preset-btn coef-preset" data-coef="0.96" title="Дождливый день: −3…−4 % посадок (измерено по данным 2025 г. и метеостанции Москва-ВДНХ)">Дождь</button>
       <button class="preset-btn coef-preset" data-coef="1.15">Событие</button>
       <button class="preset-btn coef-preset" data-coef="1.00">Норма</button>
     </div>
@@ -256,8 +289,7 @@ header{
 
     <div class="footer-note">
       API: <span id="apiUrlLabel" style="font-family:var(--mono)"></span><br>
-      Нагрузочный тест: 885 RPS, p95 190 мс, p99 250 мс (4 vCPU / 4 воркера); 610 RPS, p95 280 мс на 2 vCPU — локальный бенчмарк locust.
-    </div>
+      Нагрузочный тест: ≈ 1 030 RPS при загрузке CPU ~60 %, p95 22 мс (4 vCPU / 4 воркера, с авторизацией); насыщение ≈ 1 050 RPS — локальный бенчмарк locust.</div>
   </div>
 
 </div>
@@ -269,6 +301,87 @@ header{
 // (просто "python -m http.server" рядом с "uvicorn main:app --port 8123")
 // прокси нет, поэтому бьём напрямую в порт API.
 const API_BASE = window.location.port === "8080" ? "/api" : "http://127.0.0.1:8123";
+
+// ---- авторизация (прототип): OAuth2 Password Flow → JWT, токен в localStorage ----
+let TOKEN = localStorage.getItem("edc_token") || "";
+let USER = localStorage.getItem("edc_user") || "";
+let HORIZON = { start: "2025-11-01", end: "2026-10-31" };
+let _authResolve; const authReady = new Promise(r => _authResolve = r);
+let authMode = "login";
+function showLogin(msg){
+  document.getElementById("authOverlay").classList.remove("hidden");
+  const m = document.getElementById("authMsg"); m.className = "auth-msg"; m.textContent = msg || "";
+}
+async function apiFetch(url, opts = {}){
+  const headers = Object.assign({}, opts.headers || {}, TOKEN ? { Authorization: "Bearer " + TOKEN } : {});
+  const r = await fetch(url, Object.assign({}, opts, { headers }));
+  if(r.status === 401){
+    let d = "нужно войти заново"; try{ d = (await r.clone().json()).detail || d; }catch(e){}
+    logout(d); throw new Error("401");
+  }
+  return r;
+}
+function logout(msg){
+  TOKEN = ""; localStorage.removeItem("edc_token"); showLogin(msg);
+}
+function setMode(mode){
+  authMode = mode;
+  document.getElementById("tabLogin").classList.toggle("active", mode === "login");
+  document.getElementById("tabReg").classList.toggle("active", mode === "register");
+  document.getElementById("authPass2").style.display = mode === "register" ? "" : "none";
+  document.getElementById("authPass2").required = mode === "register";
+  document.getElementById("authSubmit").textContent = mode === "register" ? "Зарегистрироваться и войти" : "Войти";
+  document.getElementById("authMsg").textContent = "";
+}
+document.getElementById("tabLogin").onclick = () => setMode("login");
+document.getElementById("tabReg").onclick = () => setMode("register");
+async function doLogin(u, p){
+  const r = await fetch(`${API_BASE}/auth/token`, { method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ username: u, password: p }) });
+  const d = await r.json();
+  if(!r.ok) throw new Error(d.detail || "не удалось войти");
+  TOKEN = d.access_token; USER = u.trim().toLowerCase();
+  localStorage.setItem("edc_token", TOKEN); localStorage.setItem("edc_user", USER);
+}
+document.getElementById("authForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const u = document.getElementById("authUser").value, p = document.getElementById("authPass").value;
+  const msg = document.getElementById("authMsg");
+  try{
+    if(authMode === "register"){
+      if(p !== document.getElementById("authPass2").value) throw new Error("пароли не совпадают");
+      const r = await fetch(`${API_BASE}/auth/register`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: p }) });
+      const d = await r.json();
+      if(!r.ok) throw new Error(typeof d.detail === "string" ? d.detail : "ошибка регистрации");
+    }
+    await doLogin(u, p);
+    await onAuthenticated();
+  }catch(e){ msg.className = "auth-msg"; msg.textContent = e.message; }
+};
+async function onAuthenticated(){
+  try{
+    const r = await apiFetch(`${API_BASE}/model/info`);
+    const info = await r.json();
+    HORIZON = info.horizon;
+    document.getElementById("dataUntil").textContent = `Данные до ${fmtDate(info.data_until)}`;
+  }catch(e){ return; }
+  document.getElementById("authOverlay").classList.add("hidden");
+  document.getElementById("userStrip").innerHTML = `${USER} <a id="logoutLink">выйти</a>`;
+  document.getElementById("logoutLink").onclick = () => logout("");
+  applyHorizon();
+  _authResolve();
+  refresh();
+}
+function addDays(s, n){ const d = new Date(s + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0,10); }
+function monthEnd(s){ const d = new Date(s + "T00:00:00Z"); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth()+1, 0)).toISOString().slice(0,10); }
+function applyHorizon(){
+  for(const id of ["dateFrom","dateTo"]){
+    const el = document.getElementById(id); el.min = HORIZON.start; el.max = HORIZON.end;
+    if(el.value < HORIZON.start || el.value > HORIZON.end) el.value = HORIZON.start;
+  }
+}
 document.getElementById("apiUrlLabel").textContent = API_BASE || "(тот же origin)";
 
 const ROUTE_COLORS = {
@@ -331,17 +444,11 @@ document.querySelectorAll("[data-preset]").forEach(btn=>{
   btn.onclick = () => {
     document.querySelectorAll("[data-preset]").forEach(b=>b.classList.remove("active"));
     btn.classList.add("active");
-    const p = btn.dataset.preset;
-    if(p === "day"){
-      document.getElementById("dateFrom").value = "2025-11-01";
-      document.getElementById("dateTo").value = "2025-11-01";
-    } else if(p === "month"){
-      document.getElementById("dateFrom").value = "2025-11-01";
-      document.getElementById("dateTo").value = "2025-12-31";
-    } else {
-      document.getElementById("dateFrom").value = "2025-11-01";
-      document.getElementById("dateTo").value = "2026-10-31";
-    }
+    const p = btn.dataset.preset;          // границы — из горизонта модели (/model/info)
+    const f = document.getElementById("dateFrom"), t = document.getElementById("dateTo");
+    if(p === "day"){ f.value = HORIZON.start; t.value = HORIZON.start; }
+    else if(p === "month"){ f.value = HORIZON.start; t.value = monthEnd(HORIZON.start); }
+    else { f.value = HORIZON.start; t.value = HORIZON.end; }
     refresh();
   };
 });
@@ -450,7 +557,8 @@ async function whenStyleReady() {
 (async () => {
   await whenStyleReady();
   map.resize();
-  const resp = await fetch(`${API_BASE}/routes/geometry`);
+  await authReady;
+  const resp = await apiFetch(`${API_BASE}/routes/geometry`);
   routesGeo = await resp.json();
 
   map.addSource("routes", { type: "geojson", data: routesGeo });
@@ -547,6 +655,7 @@ async function whenStyleReady() {
 
 // ---- data fetch + render ----
 async function refresh(){
+  if(!TOKEN) return;
   const dateFrom = document.getElementById("dateFrom").value;
   const dateTo = document.getElementById("dateTo").value;
   document.getElementById("mapPeriodLabel").textContent =
@@ -560,8 +669,9 @@ async function refresh(){
 
   let data;
   try{
-    const resp = await fetch(`${API_BASE}/forecast?${params}`);
+    const resp = await apiFetch(`${API_BASE}/forecast?${params}`);
     data = await resp.json();
+    if(!resp.ok){ console.error("forecast:", data.detail); return; }
   }catch(e){
     console.error("forecast fetch failed", e);
     return;
@@ -642,10 +752,15 @@ function doExport(fmt){
   const dateTo = document.getElementById("dateTo").value;
   const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo, fmt, coefficient: currentCoef });
   for(const r of activeRoutes) params.append("route", r);
-  window.open(`${API_BASE}/forecast/export?${params}`, "_blank");
+  apiFetch(`${API_BASE}/forecast/export?${params}`).then(async r => {
+    if(!r.ok){ alert((await r.json()).detail || "ошибка выгрузки"); return; }
+    const url = URL.createObjectURL(await r.blob()); const a = document.createElement("a");
+    a.href = url; a.download = `forecast_${dateFrom}_${dateTo}.${fmt}`; a.click(); URL.revokeObjectURL(url);
+  }).catch(()=>{});
 }
 
-refresh();
+// старт: если токен сохранён — сразу в дашборд, иначе окно входа
+if(TOKEN){ onAuthenticated(); } else { showLogin(""); }
 </script>
 </body>
 </html>

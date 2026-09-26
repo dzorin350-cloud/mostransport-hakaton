@@ -32,10 +32,18 @@ import time
 from pathlib import Path
 from typing import Literal
 
+import io
+import re
+import uuid
+
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from auth import current_user, router as auth_router
 
 # DATA_DIR — статические данные сервиса (геометрия маршрутов); STATE_DIR — прогноз, который публикует движок.
 DATA = Path(os.environ.get("DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")))
@@ -47,6 +55,51 @@ app = FastAPI(
     description="Модель v7 (WAPE-score 0.88399) + годовая форма дня. Почасовой прогноз посадок, горизонт 12 месяцев.",
     version="2.0.0",
 )
+app.include_router(auth_router)
+INGEST = Path(os.environ.get("INGEST_DIR", "/app/ingest"))
+
+
+# ------------------------------------------------------------------ ошибки — понятные сообщения на русском
+_ERR_RU = {
+    "missing": "обязательный параметр не передан",
+    "int_parsing": "нужно целое число",
+    "float_parsing": "нужно число",
+    "literal_error": "недопустимое значение",
+    "greater_than": "значение должно быть больше",
+    "greater_than_equal": "значение должно быть не меньше",
+    "less_than_equal": "значение должно быть не больше",
+    "json_invalid": "некорректный JSON",
+}
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_ru(request: Request, exc: RequestValidationError):
+    errs = []
+    for e in exc.errors():
+        field = ".".join(str(x) for x in e.get("loc", []) if x not in ("query", "body"))
+        msg = _ERR_RU.get(e.get("type", ""), e.get("msg", "ошибка"))
+        ctx = e.get("ctx") or {}
+        if "expected" in ctx:
+            msg += f" (допустимо: {str(ctx['expected']).replace(' or ', ', ')})"
+        for k in ("gt", "ge", "le"):
+            if k in ctx:
+                msg += f" {ctx[k]}"
+        errs.append({"параметр": field, "ошибка": msg})
+    return JSONResponse(status_code=422, content={"detail": "некорректные параметры запроса", "errors": errs})
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_ru(request: Request, exc: StarletteHTTPException):
+    ru = {404: "адрес не найден", 405: "метод не поддерживается для этого адреса"}
+    detail = ru.get(exc.status_code, exc.detail) if exc.detail in ("Not Found", "Method Not Allowed") else exc.detail
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=getattr(exc, "headers", None))
+
+
+@app.exception_handler(Exception)
+async def _server_ru(request: Request, exc: Exception):
+    return JSONResponse(status_code=500, content={"detail": "внутренняя ошибка сервиса, попробуйте повторить запрос позже"})
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -146,20 +199,25 @@ def metrics() -> dict:
 
 
 @app.get("/model/info")
-def model_info() -> dict:
+def model_info(user: str = Depends(current_user)) -> dict:
     """Как построен текущий прогноз: дата данных, горизонт, множители месяцев, источники внешних данных
     (live — скачано сейчас, cache — прошлая успешная загрузка, fallback — встроенная копия)."""
     FC.get()
-    return FC.info
+    out = dict(FC.info)
+    try:
+        out["last_refresh"] = json.loads((STATE / "refresh_status.json").read_text())
+    except (FileNotFoundError, ValueError):
+        pass
+    return out
 
 
 @app.get("/routes")
-def routes() -> dict:
+def routes(user: str = Depends(current_user)) -> dict:
     return {"routes": ROUTES}
 
 
 @app.get("/routes/geometry")
-def routes_geometry() -> dict:
+def routes_geometry(user: str = Depends(current_user)) -> dict:
     """GeoJSON геометрии маршрутов (OpenStreetMap, CC-BY-SA).
 
     Источник: Overpass API, relation route=tram, ref в {1,7,11,12,17,25,26,28,50}.
@@ -176,9 +234,10 @@ def routes_geometry() -> dict:
 
 def _slice(date_from: str, date_to: str):
     try:
-        d0, d1 = pd.Timestamp(date_from).date(), pd.Timestamp(date_to).date()
-    except ValueError as exc:
-        raise HTTPException(400, f"неверный формат даты: {exc}") from exc
+        d0 = pd.to_datetime(date_from, format="%Y-%m-%d").date()
+        d1 = pd.to_datetime(date_to, format="%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        raise HTTPException(400, f"неверный формат даты: нужно ГГГГ-ММ-ДД, получено «{date_from}» и «{date_to}»") from None
     if d0 > d1:
         raise HTTPException(400, "date_from должна быть раньше date_to")
     h = FC.info["horizon"]
@@ -203,6 +262,7 @@ def forecast(
         "hour", description="Уровень агрегации ответа"
     ),
     coefficient: float = Query(1.0, gt=0, le=3.0, description="Корректирующий множитель"),
+    user: str = Depends(current_user),
 ) -> dict:
     """Прогноз посадок по фильтрам.
 
@@ -252,6 +312,7 @@ def forecast_export(
     route: list[int] | None = Query(None),
     fmt: Literal["csv", "xlsx"] = Query("csv"),
     coefficient: float = Query(1.0, gt=0, le=3.0),
+    user: str = Depends(current_user),
 ) -> Response:
     """Выгрузка прогноза в CSV или XLSX (критерий ТЗ п.4: экспорт данных)."""
     src, mask = _slice(date_from, date_to)
@@ -279,3 +340,70 @@ def forecast_export(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="forecast_{date_from}_{date_to}.xlsx"'},
     )
+
+
+# --------------------------------------------------------------------------
+# Приём данных: новые валидации → история → движок пересчитывает прогноз сам
+# --------------------------------------------------------------------------
+
+def _store(df: pd.DataFrame, kind: str, user: str) -> dict:
+    df = df.groupby(["route", "date", "hour"], as_index=False)["boardings"].sum()
+    INGEST.mkdir(parents=True, exist_ok=True)
+    name = f"ingest_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.csv"
+    tmp = INGEST / (name + ".tmp")
+    df.to_csv(tmp, sep=";", index=False)
+    os.replace(tmp, INGEST / name)                     # движок видит файл только целиком
+    return {"принято_строк": int(len(df)), "дат": sorted(df["date"].unique().tolist()), "файл": name, "тип": kind,
+            "пользователь": user,
+            "сообщение": "данные сохранены; движок подхватит их и пересчитает прогноз в течение ~1 минуты "
+                         "(дата данных и горизонт — в /model/info)"}
+
+
+def _check_new(df: pd.DataFrame) -> None:
+    last = FC.info.get("data_until")
+    if last and (df["date"] <= last).any():
+        raise HTTPException(409, f"данные за {last} и ранее уже есть в истории; принимаются только даты после {last}")
+
+
+@app.post("/ingest/hourly", tags=["Приём данных"], summary="Почасовые посадки: CSV route;date;hour;boardings")
+def ingest_hourly(body: str = Body(..., media_type="text/csv"), user: str = Depends(current_user)) -> dict:
+    try:
+        df = pd.read_csv(io.StringIO(body), sep=";")
+    except Exception as exc:
+        raise HTTPException(400, f"не удалось прочитать CSV: {exc}") from exc
+    need = {"route", "date", "hour", "boardings"}
+    if not need <= set(df.columns):
+        raise HTTPException(400, f"нужны колонки {sorted(need)} с разделителем «;», получены {list(df.columns)}")
+    try:
+        df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d").dt.strftime("%Y-%m-%d")
+        df["route"] = df["route"].astype(int); df["hour"] = df["hour"].astype(int); df["boardings"] = df["boardings"].astype(float)
+    except Exception as exc:
+        raise HTTPException(400, f"неверный формат значений (дата ГГГГ-ММ-ДД, route/hour — целые, boardings — число): {exc}") from exc
+    if not df["hour"].between(0, 23).all() or (df["boardings"] < 0).any():
+        raise HTTPException(400, "hour должен быть 0–23, boardings — не отрицательным")
+    _check_new(df)
+    return _store(df, "hourly", user)
+
+
+@app.post("/ingest/validations", tags=["Приём данных"],
+          summary="Сырые валидации в формате train.csv (разделитель «;»): агрегация на стороне сервиса")
+def ingest_validations(body: str = Body(..., media_type="text/csv"), user: str = Depends(current_user)) -> dict:
+    try:
+        v = pd.read_csv(io.StringIO(body), sep=";", dtype=str, quoting=3)
+    except Exception as exc:
+        raise HTTPException(400, f"не удалось прочитать CSV: {exc}") from exc
+    need = {"tran_date_time", "validation_result", "ngpt_route"}
+    if not need <= set(v.columns):
+        raise HTTPException(400, f"нужны колонки {sorted(need)} (как в train.csv)")
+    n_all = len(v)
+    v = v[v["validation_result"].str.strip() == "1"]                       # посадка = успешная валидация
+    ts = pd.to_datetime(v["tran_date_time"], errors="coerce")
+    route = v["ngpt_route"].str.extract(r"^(\d+)")[0]
+    ok = ts.notna() & route.notna()
+    df = pd.DataFrame({"route": route[ok].astype(int), "date": ts[ok].dt.strftime("%Y-%m-%d"), "hour": ts[ok].dt.hour, "boardings": 1.0})
+    if df.empty:
+        raise HTTPException(400, "нет успешных валидаций с корректной датой и маршрутом")
+    _check_new(df)
+    out = _store(df, "validations", user)
+    out.update({"строк_во_входе": n_all, "успешных_валидаций": int(ok.sum())})
+    return out

@@ -1,5 +1,8 @@
 # Хакатон МТТЕХ: прогноз посадок в трамваях Москвы
 
+> **Жюри:** запуск и проверка — [docs/JURY.md](docs/JURY.md). Внешние данные — [docs/EXTERNAL_DATA.md](docs/EXTERNAL_DATA.md),
+> область определения и адаптации — [docs/APPLICABILITY.md](docs/APPLICABILITY.md), все прогоны и тесты — [docs/TESTS.md](docs/TESTS.md).
+
 Почасовой прогноз посадок на 10 маршрутах трамвая (маршрут × дата × час).
 **Модель v7, лидерборд 0,88399 (WAPE-score).** Подробное описание — в [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -8,7 +11,7 @@
 **Веб-сервис** (REST API + дашборд с картой, требование ТЗ п.3–4) — в
 [`service/`](service/README.md). Быстрый старт: `cd service && docker
 compose up -d --build`, дашборд на http://localhost:8080. Нагрузочный тест:
-1 282 RPS, p95 68 мс на 4 vCPU / 4 ГБ и 890 RPS на 2 vCPU / 2 ГБ
+≈ 1 030 RPS при загрузке CPU ~60 %, p95 22 мс на 4 vCPU / 4 ГБ (насыщение ≈ 1 050–1 280 RPS), 890 RPS на 2 vCPU / 2 ГБ; память ~1 ГБ, swap 0
 (подробности в `service/README.md`). Сервис сам применяет модель и сам скачивает внешние данные —
 [`service/engine/README.md`](service/engine/README.md). Все прогоны и тесты — [`docs/TESTS.md`](docs/TESTS.md).
 

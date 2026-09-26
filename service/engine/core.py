@@ -110,9 +110,11 @@ def clean_history(tr: pd.DataFrame, cal: Calendar, thr=1.5, wk_thr=0.15) -> tupl
 
 # ============================================================================ движок
 class Engine:
-    def __init__(self, history_dir: Path, artifacts_dir: Path = HERE / "artifacts",
+    def __init__(self, history_dir, artifacts_dir: Path = HERE / "artifacts",
                  cache_dir: Path = Path("/tmp/tram_engine_cache"), fetch: bool = True):
-        self.history_dir, self.artifacts_dir, self.cache_dir, self.fetch = Path(history_dir), Path(artifacts_dir), Path(cache_dir), fetch
+        dirs = history_dir if isinstance(history_dir, (list, tuple)) else [history_dir]
+        self.history_dirs = [Path(d) for d in dirs]
+        self.artifacts_dir, self.cache_dir, self.fetch = Path(artifacts_dir), Path(cache_dir), fetch
         self.config = json.loads((self.artifacts_dir / "config.json").read_text())
         self.routes_all = self.config["routes_all"]
         self.models = []
@@ -124,9 +126,9 @@ class Engine:
 
     # ---------------------------------------------------------------- история
     def load_history(self) -> pd.DataFrame:
-        files = sorted(self.history_dir.glob("*.csv"))
+        files = sorted(f for d in self.history_dirs if d.exists() for f in d.glob("*.csv"))
         if not files:
-            raise RuntimeError(f"нет истории в {self.history_dir}")
+            raise RuntimeError(f"нет истории в {self.history_dirs}")
         h = pd.concat([pd.read_csv(f, sep=";") for f in files], ignore_index=True)
         h["date"] = pd.to_datetime(h["date"])
         h = h.groupby(["route", "date", "hour"], as_index=False).boardings.sum()
@@ -168,7 +170,9 @@ class Engine:
                              else sources.fetch_calendar(years, self.cache_dir, timeout=0.001))
         cal = Calendar(codes)
         rid, rid_status = sources.fetch_ridership(data_until, self.cache_dir, timeout=20 if self.fetch else 0.001)
-        mult = self.month_multipliers(rid, origin, HORIZON_MONTHS)
+        # база множителей — последний месяц с городскими данными (при неполном текущем месяце это прошлый месяц)
+        base = min(origin, pd.Period(f"{int(rid.year.iloc[-1])}-{int(rid.month.iloc[-1]):02d}", "M"))
+        mult = self.month_multipliers(rid, base, (origin + HORIZON_MONTHS - base).n)
         tr, flags = clean_history(hist, cal)
         L = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(days=p["lvl"])].groupby("route").boardings.sum() / p["lvl"]
         pt = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(weeks=p["weeks"])].merge(cal.features(tr.date), on="date")
@@ -180,7 +184,7 @@ class Engine:
         full_months = set(ndays[ndays >= 20].index)
         MS = th[th.ym.isin(full_months)].groupby(["route", "ym", "dt", "hour"]).sh.mean()
 
-        months_missing = [str(origin + k) for k in range(1, HORIZON_MONTHS + 1) if (origin + k) not in mult]
+        months_missing = [str(p) for p in pd.period_range(pd.Period(h_start, "M"), pd.Period(h_end, "M"), freq="M") if p not in mult]
         if months_missing:
             raise RuntimeError(f"нет сезонных множителей для {months_missing}")
 
@@ -235,7 +239,8 @@ class Engine:
             "data_until": str(data_until),
             "history_files": self.history_files,
             "horizon": {"start": str(h_start), "end": str(h_end)},
-            "month_multipliers": {str(k): round(v, 4) for k, v in mult.items()},
+            "month_multipliers": {str(k): round(v, 4) for k, v in mult.items() if k >= pd.Period(h_start, "M")},
+            "multiplier_base_month": str(base),
             "year_shape_months": blended_months,
             "year_shape_alpha": SHAPE_ALPHA,
             "cleaned_route_days": int(flags.m.sum()),

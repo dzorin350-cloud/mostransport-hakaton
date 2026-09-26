@@ -17,8 +17,20 @@ ROUTES = [1, 7, 11, 12, 17, 25, 26, 28, 50]
 DATES = [f"2025-11-{d:02d}" for d in range(1, 29)] + [f"2025-12-{d:02d}" for d in range(1, 29)]
 
 
+LOAD_USER, LOAD_PASS = "loadtest", "loadtest-password"
+
+
 class ForecastUser(HttpUser):
     wait_time = between(0.05, 0.2)
+
+    def on_start(self):
+        """Авторизация (прототип): регистрируем тестового пользователя (если уже есть — 409) и получаем токен."""
+        with self.client.post("/auth/register", json={"username": LOAD_USER, "password": LOAD_PASS},
+                              name="/auth/register", catch_response=True) as r:
+            if r.status_code in (201, 409):      # 409 — пользователь уже есть, это нормально
+                r.success()
+        r = self.client.post("/auth/token", data={"username": LOAD_USER, "password": LOAD_PASS}, name="/auth/token")
+        self.client.headers.update({"Authorization": "Bearer " + r.json()["access_token"]})
 
     @task(5)
     def forecast_hourly(self):
