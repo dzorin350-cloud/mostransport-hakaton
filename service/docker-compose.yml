@@ -1,8 +1,8 @@
 services:
   api:
     build:
-      context: .
-      dockerfile: api/Dockerfile
+      context: ..
+      dockerfile: service/api/Dockerfile
     ports:
       - "8123:8000"
     # ТЗ: сервис — один контейнер 2-4 vCPU / 2-4 ГБ RAM. По умолчанию — максимум (4 vCPU / 4 ГБ, 4 воркера);
@@ -14,11 +14,15 @@ services:
         limits:
           cpus: "4"
           memory: 4g
+    # история валидаций: новые файлы route;date;hour;boardings в ../labels подхватываются движком без перезапуска
+    volumes:
+      - ../labels:/app/history:ro
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
       timeout: 3s
       retries: 5
+      start_period: 120s
 
   web:
     image: nginx:alpine

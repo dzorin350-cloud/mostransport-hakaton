@@ -1,12 +1,17 @@
+# Контекст сборки — корень репозитория (см. docker-compose.yml: build.context: ..)
 FROM python:3.12-slim
 WORKDIR /app
-COPY api/requirements.txt .
+COPY service/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY api/main.py .
-COPY data /app/data
-ENV DATA_DIR=/app/data
+COPY service/__init__.py service/__init__.py
+COPY service/engine service/engine
+COPY service/api/main.py main.py
+COPY service/data/routes.geojson data/routes.geojson
+COPY service/start.sh start.sh
+# история валидаций (почасовые агрегаты route;date;hour;boardings); в проде монтируется томом и пополняется
+COPY labels/ history/
+ENV DATA_DIR=/app/data STATE_DIR=/app/state OUT_DIR=/app/state HISTORY_DIR=/app/history \
+    WORKERS=4 REFRESH_HOURS=24 CHECK_SECONDS=60 PYTHONUNBUFFERED=1
 EXPOSE 8000
-# Число воркеров = числу vCPU контейнера (по умолчанию 4; для 2 vCPU: WORKERS=2,
-# см. docker-compose.2cpu.yml и README service, раздел «Производительность»)
-ENV WORKERS=4
-CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS}"]
+# Число воркеров = числу vCPU контейнера (для 2 vCPU: WORKERS=2, см. docker-compose.2cpu.yml)
+CMD ["./start.sh"]

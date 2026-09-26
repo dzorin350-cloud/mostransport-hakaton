@@ -1,0 +1,49 @@
+{
+ "model_version": "v7 (CatBoost x5 + профиль + сезонный множитель; лидерборд 0.88399) + годовая форма дня",
+ "trained_on_until": "2025-10-31",
+ "trained_on_rows": 65664,
+ "cleaned_route_days": 168,
+ "routes_all": [
+  1,
+  5,
+  7,
+  11,
+  12,
+  17,
+  25,
+  26,
+  28,
+  50
+ ],
+ "routes_model": [
+  1,
+  7,
+  11,
+  12,
+  17,
+  25,
+  26,
+  28,
+  50
+ ],
+ "models": [
+  "catboost_seed0.cbm",
+  "catboost_seed1.cbm",
+  "catboost_seed2.cbm",
+  "catboost_seed3.cbm",
+  "catboost_seed4.cbm"
+ ],
+ "params": {
+  "lvl": 56,
+  "weeks": 2,
+  "norm_win": 42,
+  "iters": 800,
+  "depth": 8,
+  "lr": 0.04905753911390645,
+  "l2": 12.027549924785951,
+  "rs": 0.891186687006605,
+  "ss": 0.5911635469627102,
+  "loss": "RMSE",
+  "boot": "Bernoulli"
+ }
+}

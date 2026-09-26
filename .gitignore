@@ -6,3 +6,4 @@ __pycache__/
 .venv/
 .claude/
 service/api/.venv/
+catboost_info/

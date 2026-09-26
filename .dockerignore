@@ -1,0 +1,5 @@
+.git
+v7/output
+**/__pycache__
+experiments
+*.md
