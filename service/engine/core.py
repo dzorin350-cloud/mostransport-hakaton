@@ -175,9 +175,11 @@ class Engine:
         codes, cal_status = (sources.fetch_calendar(years, self.cache_dir) if self.fetch
                              else sources.fetch_calendar(years, self.cache_dir, timeout=0.001))
         cal = Calendar(codes)
-        rid, rid_status = sources.fetch_ridership(data_until, self.cache_dir, timeout=20 if self.fetch else 0.001)
+        # городская статистика — только по последний ПОЛНЫЙ месяц истории (иначе в месячный итог попадают дни, которых у модели ещё нет)
+        last_full = data_until if data_until == origin.end_time.date() else (origin - 1).end_time.date()
+        rid, rid_status = sources.fetch_ridership(last_full, self.cache_dir, timeout=20 if self.fetch else 0.001)
         # база множителей — последний месяц с городскими данными (при неполном текущем месяце это прошлый месяц)
-        base = min(origin, pd.Period(f"{int(rid.year.iloc[-1])}-{int(rid.month.iloc[-1]):02d}", "M"))
+        base = min(pd.Period(last_full, "M"), pd.Period(f"{int(rid.year.iloc[-1])}-{int(rid.month.iloc[-1]):02d}", "M"))
         mult = self.month_multipliers(rid, base, (origin + HORIZON_MONTHS - base).n)
         tr, flags = clean_history(hist, cal)
         L = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(days=p["lvl"])].groupby("route").boardings.sum() / p["lvl"]

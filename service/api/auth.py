@@ -41,6 +41,8 @@ def _secret() -> str:
 
 
 SECRET = _secret()
+DEMO_USER = os.environ.get("DEMO_USER", "demo")
+DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "demo2025")
 
 
 def _db() -> sqlite3.Connection:
@@ -52,6 +54,18 @@ def _db() -> sqlite3.Connection:
 
 def _hash(password: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
+
+
+def _seed_demo() -> None:
+    """Демо-аккаунт для жюри (DEMO_USER / DEMO_PASSWORD), создаётся при старте, если его нет. Пустой DEMO_USER — не создавать."""
+    if not DEMO_USER:
+        return
+    salt = secrets.token_bytes(16)
+    with _db() as con:
+        con.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?)", (DEMO_USER.lower(), salt, _hash(DEMO_PASSWORD, salt), dt.datetime.utcnow().isoformat()))
+
+
+_seed_demo()
 
 
 class RegisterIn(BaseModel):

@@ -25,6 +25,11 @@ def run_once(engine: Engine):
     OUT.mkdir(parents=True, exist_ok=True)
     t = engine.table
     t.to_parquet(OUT / "forecast.parquet.tmp", index=False); os.replace(OUT / "forecast.parquet.tmp", OUT / "forecast.parquet")
+    # архив: прогноз, сделанный по данным до даты X, — для честной проверки на фактах, которые придут позже
+    (OUT / "archive").mkdir(parents=True, exist_ok=True)
+    arch = OUT / "archive" / f"forecast_until_{info['data_until']}.parquet"
+    if not arch.exists():
+        t.to_parquet(arch, index=False)
     (OUT / "info.json.tmp").write_text(json.dumps(info, ensure_ascii=False, indent=1)); os.replace(OUT / "info.json.tmp", OUT / "info.json")
     log.info("прогноз опубликован: данные до %s, горизонт %s … %s", info["data_until"], info["horizon"]["start"], info["horizon"]["end"])
     (OUT / "refresh_status.json").write_text(json.dumps({"ok": True, "at": info["computed_at"]}, ensure_ascii=False))

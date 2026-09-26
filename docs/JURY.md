@@ -12,9 +12,12 @@ git clone <ссылка на репозиторий> && cd mostransport-hakaton/
 docker compose up -d --build
 ```
 
-- Дашборд: **http://localhost:8080** — сначала откроется окно входа: вкладка «Регистрация», любой логин (латиница, от 3 символов) и пароль (от 6 символов).
+- Дашборд: **http://localhost:8080** — сначала откроется окно входа. **Демо-аккаунт: `demo` / `demo2025`** (создаётся при старте),
+  или вкладка «Регистрация» — любой логин (латиница, от 3 символов) и пароль (от 6 символов).
 - API: **http://localhost:8123**, интерактивная документация (Swagger): **http://localhost:8123/docs**.
 - Первый запуск: сервис ~30 с строит прогноз (применяет модель и скачивает внешние данные), затем `docker compose ps` показывает `healthy`.
+- **Без сборки, из готового образа:** `docker load -i tram-forecast-api_v7-engine_amd64.tar.gz`, затем
+  `docker compose -f docker-compose.yml -f docker-compose.image.yml up -d` (для Mac на Apple Silicon — файл `_arm64` и `TRAM_IMAGE=tram-forecast-api:v7-engine`).
 - Минимальная конфигурация по ТЗ (2 vCPU / 2 ГБ): `docker compose -f docker-compose.yml -f docker-compose.2cpu.yml up -d --build`.
 - Остановить: `docker compose down` (с удалением пользователей и принятых данных: `docker compose down -v`).
 
@@ -32,8 +35,7 @@ docker compose up -d --build
 
 ```bash
 B=http://localhost:8123
-curl -X POST $B/auth/register -H 'Content-Type: application/json' -d '{"username":"jury","password":"jury123"}'
-TOKEN=$(curl -s -X POST $B/auth/token -d 'username=jury&password=jury123' | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
+TOKEN=$(curl -s -X POST $B/auth/token -d 'username=demo&password=demo2025' | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
 H="Authorization: Bearer $TOKEN"
 
 curl -H "$H" "$B/model/info"                                                                  # как построен прогноз
@@ -43,17 +45,21 @@ curl -H "$H" "$B/forecast?date_from=2025-11-01&date_to=2026-10-31&granularity=mo
 curl -H "$H" "$B/forecast?date_from=2025-11-10&date_to=2025-11-16&granularity=week&coefficient=0.96"
 curl -H "$H" -o forecast.xlsx "$B/forecast/export?date_from=2025-11-01&date_to=2025-11-07&fmt=xlsx"
 curl -H "$H" "$B/forecast/stops?date_from=2025-11-12&date_to=2025-11-12&route=17&hour_from=7&hour_to=9"  # по остановкам
+curl -H "$H" "$B/fleet?date_from=2025-11-13&date_to=2025-11-13&route=17&hour_from=6&hour_to=21"      # загрузка вагонов и рекомендация выпуска
+curl -H "$H" "$B/monitor/accuracy"                                                             # факт против прогноза (после приёма данных)
 curl -H "$H" "$B/forecast?date_from=2027-01-01&date_to=2027-01-02"                            # вне горизонта → понятная ошибка
 ```
 
 | Эндпоинт | Назначение |
 |---|---|
 | `POST /auth/register`, `POST /auth/token`, `GET /auth/me` | регистрация, вход (OAuth2 Password Flow → JWT), текущий пользователь |
-| `GET /forecast` | прогноз: `date_from`, `date_to`, `route` (можно несколько), `hour_from`/`hour_to`, `granularity=hour\|day\|week\|month`, `coefficient` |
+| `GET /forecast` | прогноз с коридором 80 % (`lo`, `hi`): `date_from`, `date_to`, `route` (можно несколько), `hour_from`/`hour_to`, `granularity=hour\|day\|week\|month`, `coefficient` |
 | `GET /forecast/export` | то же в файл `fmt=csv\|xlsx` |
 | `GET /model/info` | дата данных, горизонт, множители, источники внешних данных и их статус |
 | `POST /ingest/hourly` | почасовые посадки CSV `route;date;hour;boardings` |
 | `POST /ingest/validations` | сырые валидации в формате `train.csv`, агрегация на стороне сервиса |
+| `GET /fleet` | загрузка вагонов по часам (норма / повышенная / риск переполнения) и рекомендация выпуска вагонов |
+| `GET /monitor/accuracy` | потоковый контроль: точность прогноза на поступивших фактах (прогноз из архива, сделанный до факта) |
 | `GET /stops`, `GET /forecast/stops` | остановки и прогноз по остановкам (оценочная разбивка по расписанию GTFS) |
 | `GET /routes`, `GET /routes/geometry` | маршруты и их геометрия (OpenStreetMap) |
 | `GET /health`, `GET /metrics` | состояние сервиса (без авторизации) |

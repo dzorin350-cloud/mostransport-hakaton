@@ -36,6 +36,7 @@ import io
 import re
 import uuid
 
+import numpy as np
 import pandas as pd
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -232,6 +233,29 @@ def routes_geometry(user: str = Depends(current_user)) -> dict:
 # --------------------------------------------------------------------------
 
 
+INTERVALS = pd.read_csv(Path(os.environ.get("INTERVALS_PATH", "/app/service/engine/artifacts/interval_factors.csv")))
+INTERVAL_NOTE = ("lo–hi — коридор 80 %: в 8 из 10 случаев факт попадал в эти границы на бэктестах того же горизонта "
+                 "(проверка покрытия на отложенном периоде: часы 78–83 %, дни 82–89 %)")
+
+
+_INT_TABLES: dict = {}
+
+
+def _interval(level: str, start) -> tuple:
+    """Множители коридора по детализации и числу дней от даты данных до начала строки."""
+    base = pd.Timestamp(FC.info["data_until"]).date()
+    t = _INT_TABLES.get(level)
+    if t is None:
+        t = _INT_TABLES[level] = INTERVALS[INTERVALS.level == level].sort_values("days_from")[["days_to", "lo", "hi"]].to_numpy()
+    start = pd.Series(start)
+    uniq = start.unique()                                   # дат в ответе мало — считаем горизонт только для уникальных
+    ahead_u = np.array([max((d - base).days, 1) for d in uniq])
+    idx_u = np.searchsorted(t[:, 0], ahead_u, side="left").clip(0, len(t) - 1)
+    pos = pd.Index(uniq).get_indexer(start)
+    idx = idx_u[pos]
+    return t[idx, 1], t[idx, 2]
+
+
 def _slice(date_from: str, date_to: str):
     try:
         d0 = pd.to_datetime(date_from, format="%Y-%m-%d").date()
@@ -279,21 +303,21 @@ def forecast(
     df["prediction"] = (df["prediction"] * coefficient).round(1)
 
     if granularity == "hour":
-        out = df[["route", "date", "hour", "prediction"]].copy()
-        out["date"] = out["date"].astype(str)
-        rows = out.to_dict(orient="records")
+        out = df[["route", "date", "hour", "prediction"]].copy(); start = out["date"]
     elif granularity == "day":
-        g = df.groupby(["route", "date"])["prediction"].sum().reset_index()
-        g["date"] = g["date"].astype(str)
-        rows = g.to_dict(orient="records")
+        out = df.groupby(["route", "date"])["prediction"].sum().reset_index(); start = out["date"]
     elif granularity == "week":
-        df["week"] = [str(d - pd.Timedelta(days=d.weekday())) for d in df["date"]]   # понедельник недели
-        g = df.groupby(["route", "week"])["prediction"].sum().reset_index()
-        rows = g.to_dict(orient="records")
+        df["week"] = [d - pd.Timedelta(days=d.weekday()) for d in df["date"]]   # понедельник недели
+        out = df.groupby(["route", "week"])["prediction"].sum().reset_index(); start = out["week"]
     else:
         df["month"] = [f"{d.year}-{d.month:02d}" for d in df["date"]]
-        g = df.groupby(["route", "month"])["prediction"].sum().reset_index()
-        rows = g.to_dict(orient="records")
+        out = df.groupby(["route", "month"])["prediction"].sum().reset_index(); start = pd.to_datetime(out["month"] + "-01").dt.date
+    lo, hi = _interval(granularity, start)
+    out["lo"] = (out["prediction"] * lo).round(1); out["hi"] = (out["prediction"] * hi).round(1)
+    for col in ("date", "week"):
+        if col in out:
+            out[col] = out[col].astype(str)
+    rows = out.to_dict(orient="records")
 
     return {
         "count": len(rows),
@@ -301,6 +325,7 @@ def forecast(
         "total_prediction": round(df["prediction"].sum(), 1),
         "data_until": FC.info.get("data_until"),
         "model_version": FC.info.get("model_version"),
+        "interval": INTERVAL_NOTE,
         "rows": rows,
     }
 
@@ -464,3 +489,113 @@ def forecast_stops(
     rows = by_stop.assign(stop=by_stop["stop"].astype(str)).to_dict(orient="records")
     return {"count": len(rows), "total_prediction": round(float(tot.sum()), 1), "note": STOPS_NOTE,
             "data_until": FC.info.get("data_until"), "rows": rows}
+
+
+# --------------------------------------------------------------------------
+# Загрузка вагонов и рекомендация выпуска (engine/build_fleet.py → artifacts/fleet_norms.csv)
+# --------------------------------------------------------------------------
+FLEET_PATH = Path(os.environ.get("FLEET_PATH", "/app/service/engine/artifacts/fleet_norms.csv"))
+FLEET = pd.read_csv(FLEET_PATH) if FLEET_PATH.exists() else None
+FLEET_NOTE = ("вагонов в работе — оценка по числу вагонов с валидациями в этот час (последние 8 недель); загрузка — посадок на вагон в час "
+              "относительно истории маршрута: «риск переполнения» — выше 90-го процентиля, рекомендация — минимум вагонов, чтобы не "
+              "превышать 75-й процентиль. Посадки ≠ наполненность салона (выходов в данных нет) — это относительная оценка.")
+
+
+def _daytype(dates) -> list:
+    """Тип дня по производственному календарю (кэш движка, иначе встроенная копия): hol — праздничный будний, wd, sat, sun."""
+    out = []
+    for d in pd.to_datetime(pd.Series(dates).astype(str)):
+        if d.year not in _CAL:
+            f = STATE / "cache" / f"cal_{d.year}.txt"
+            if not f.exists():
+                f = Path("/app/service/engine/fallback") / f"cal_{d.year}.txt"
+            _CAL[d.year] = f.read_text().strip() if f.exists() else ""
+        codes = _CAL[d.year]
+        c = codes[d.dayofyear - 1] if len(codes) >= d.dayofyear else ("1" if d.dayofweek >= 5 else "0")
+        out.append("hol" if (c == "1" and d.dayofweek < 5) else ("wd" if d.dayofweek < 5 else ("sat" if d.dayofweek == 5 else "sun")))
+    return out
+
+
+_CAL: dict = {}
+
+
+@app.get("/fleet", tags=["Выпуск вагонов"], summary="Загрузка вагонов и рекомендация выпуска по часам")
+def fleet(
+    date_from: str = Query(..., description="YYYY-MM-DD"),
+    date_to: str = Query(..., description="YYYY-MM-DD"),
+    route: list[int] | None = Query(None),
+    hour_from: int = Query(5, ge=0, le=23),
+    hour_to: int = Query(23, ge=0, le=23),
+    coefficient: float = Query(1.0, gt=0, le=3.0),
+    min_share: float = Query(0.6, ge=0, le=1.0, description="минимальная доля обычного выпуска в рекомендации"),
+    user: str = Depends(current_user),
+) -> dict:
+    if FLEET is None:
+        raise HTTPException(503, "нормы выпуска не загружены")
+    src, mask = _slice(date_from, date_to)
+    mask &= (src["hour"] >= hour_from) & (src["hour"] <= hour_to) & src["route"].isin(FLEET.route.unique())
+    if route:
+        mask &= src["route"].isin(route)
+    df = src[mask][["route", "date", "hour", "prediction"]].copy()
+    df["prediction"] = df["prediction"] * coefficient
+    days = sorted(df["date"].unique()); dt_map = dict(zip(days, _daytype(days)))
+    df["dt"] = df["date"].map(dt_map)
+    df = df.merge(FLEET, on=["route", "dt", "hour"], how="left")
+    df["veh_typ"] = df["veh_typ"].fillna(0)
+    df["bpv"] = np.where(df.veh_typ > 0, df.prediction / df.veh_typ.replace(0, np.nan), np.nan)
+    df["load_index"] = df.bpv / df.bpv_p90
+    df["status"] = np.where(df.load_index > 1.0, "риск переполнения", np.where(df.load_index > 0.85, "повышенная", "норма"))
+    # минимум вагонов, чтобы загрузка не превышала 75-й процентиль маршрута; не меньше 60 % обычного выпуска (интервалы не растут
+    # больше чем в ~1,7 раза) — операционное ограничение, задаётся параметром min_share
+    df["veh_recommended"] = np.maximum(np.ceil(df.prediction / df.bpv_p75), np.ceil(df.veh_typ * min_share)).clip(lower=1)
+    df["veh_delta"] = df.veh_recommended - df.veh_typ
+    out = df.assign(date=df["date"].astype(str), prediction=df.prediction.round(1), bpv=df.bpv.round(1), load_index=df.load_index.round(2))
+    rows = out[["route", "date", "hour", "prediction", "veh_typ", "bpv", "load_index", "status", "veh_recommended", "veh_delta"]].to_dict(orient="records")
+    summ = out.groupby("route").agg(vehicle_hours_typical=("veh_typ", "sum"), vehicle_hours_recommended=("veh_recommended", "sum"),
+                                    hours_overload_risk=("status", lambda s: int((s == "риск переполнения").sum()))).reset_index()
+    return {"count": len(rows), "note": FLEET_NOTE, "data_until": FC.info.get("data_until"),
+            "summary": summ.to_dict(orient="records"),
+            "total": {"vehicle_hours_typical": float(summ.vehicle_hours_typical.sum()), "vehicle_hours_recommended": float(summ.vehicle_hours_recommended.sum()),
+                      "hours_overload_risk": int(summ.hours_overload_risk.sum())},
+            "rows": rows}
+
+
+# --------------------------------------------------------------------------
+# Потоковый контур: факт против прогноза, сделанного ДО поступления факта
+# --------------------------------------------------------------------------
+HIST_DIRS = [Path(os.environ.get("HISTORY_DIR", "/app/history")), INGEST]
+ARCHIVE = STATE / "archive"
+
+
+@app.get("/monitor/accuracy", tags=["Мониторинг"], summary="Точность прогноза на поступивших фактических данных")
+def monitor_accuracy(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                     forecast: Literal["latest", "earliest"] = Query("latest", description="latest — самый свежий прогноз до факта, earliest — самый ранний"),
+                     user: str = Depends(current_user)) -> dict:
+    """Для каждой даты с фактом берётся прогноз из архива, опубликованный по данным ДО этой даты (честная проверка «как в жизни»)."""
+    snaps = sorted(ARCHIVE.glob("forecast_until_*.parquet"))
+    if not snaps:
+        return {"detail": "архив прогнозов пуст: точность появится после поступления новых фактических данных", "rows": []}
+    facts = pd.concat([pd.read_csv(f, sep=";") for d in HIST_DIRS if d.exists() for f in d.glob("*.csv")], ignore_index=True)
+    facts = facts.groupby(["route", "date", "hour"], as_index=False)["boardings"].sum()
+    rows, allm = [], []
+    for sp in snaps:
+        until = sp.stem.replace("forecast_until_", "")
+        fc = pd.read_parquet(sp); fc["date"] = pd.to_datetime(fc["date"]).dt.strftime("%Y-%m-%d")
+        m = fc.merge(facts, on=["route", "date", "hour"])
+        if date_from: m = m[m.date >= date_from]
+        if date_to: m = m[m.date <= date_to]
+        m = m[m.route.isin(FLEET.route.unique() if FLEET is not None else m.route.unique()) & (m.date > until)]
+        if m.empty:
+            continue
+        m["forecast_until"] = until; allm.append(m)
+    if not allm:
+        return {"detail": "фактов за даты прогноза пока нет", "rows": []}
+    m = pd.concat(allm).sort_values("forecast_until").drop_duplicates(["route", "date", "hour"], keep="last" if forecast == "latest" else "first")
+    m["ahead_days"] = (pd.to_datetime(m.date) - pd.to_datetime(m.forecast_until)).dt.days
+    def score(g): return round(1 - (g.boardings - g.prediction).abs().sum() / max(g.boardings.sum(), 1), 4)
+    by_day = [{"date": d, "wape_score": score(g), "fact": float(g.boardings.sum()), "forecast": round(float(g.prediction.sum()), 1),
+               "forecast_made_from_data_until": g.forecast_until.iloc[0]} for d, g in m.groupby("date")]
+    by_route = [{"route": int(r), "wape_score": score(g), "bias": round(float(g.prediction.sum() / max(g.boardings.sum(), 1) - 1), 4)} for r, g in m.groupby("route")]
+    return {"wape_score": score(m), "hours": int(len(m)), "days": len(by_day), "forecast_used": forecast,
+            "mean_days_ahead": round(float(m.ahead_days.mean()), 1), "by_day": by_day, "by_route": by_route,
+            "note": "метрика WAPE-score = 1 − Σ|факт − прогноз| / Σ факт; прогноз взят из архива на дату данных до факта"}
