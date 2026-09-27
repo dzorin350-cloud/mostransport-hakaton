@@ -221,6 +221,11 @@ class Engine:
         L = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(days=p["lvl"])].groupby("route").boardings.sum() / p["lvl"]
         pt = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(weeks=p["weeks"])].merge(cal.features(tr.date), on="date")
         PR = pt[pt.hol_wd == 0].groupby(["route", "dow", "hour"]).boardings.agg(p.get("prof_agg", "mean")).rename("p").reset_index()
+        # воскресный профиль — для праздничных будней
+        ps8 = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(weeks=p.get("sun_weeks", 8))].merge(cal.features(tr.date), on="date")
+        PRS = ps8[(ps8.dow == 6) & (ps8.hol_wd == 0)].groupby(["route", "hour"]).boardings.median().rename("ps").reset_index()
+        w_wd, w_we, w_night, w_hol = p.get("w_wd", 0.6), p.get("w_we", 0.8), p.get("w_night"), p.get("w_hol", 1.0)
+        night = p.get("night_hours", [])
         # формы дня по месяцам истории (для годовой части)
         th = tr.copy(); th["dt"] = cal.daytype(th.date); th["ym"] = th.date.dt.to_period("M")
         tot = th.groupby(["route", "date"]).boardings.transform("sum"); th["sh"] = th.boardings / tot.replace(0, np.nan)
@@ -246,8 +251,12 @@ class Engine:
                 shapes.append(np.mean([np.clip(m.predict(X), 0, None) for m in ms], axis=0))
             cb = np.mean(shapes, axis=0) * frb.route.map(L).values * f
             pf = frb.merge(PR, on=["route", "dow", "hour"], how="left").p.fillna(0).values * f
-            w = np.where(frb.dow.values >= 5, 0.8, 0.6)
-            return np.where(frb.hol_wd.values == 1, cb, w * cb + (1 - w) * pf)
+            # смесь CatBoost / профиль: будни, выходные, ночные часы; праздничные будни — CatBoost + воскресный профиль
+            w = np.where(frb.dow.values >= 5, w_we, w_wd)
+            if w_night is not None:
+                w = np.where(frb.hour.isin(night).values, w_night, w)
+            ps = frb.merge(PRS, on=["route", "hour"], how="left").ps.fillna(0).values * f
+            return np.where(frb.hol_wd.values == 1, w_hol * cb + (1 - w_hol) * ps, w * cb + (1 - w) * pf)
 
         Fb = F.merge(C, on="date")
         Fb["prediction"] = pred(Fb)

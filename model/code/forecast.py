@@ -42,6 +42,7 @@ fac={p:mult(p) for p in pd.period_range(pd.Period(start,'M'),pd.Period(end,'M'),
 # 4) прогноз
 days=pd.date_range(start,end); F=pd.MultiIndex.from_product([ROUTES,days,range(24)],names=['route','date','hour']).to_frame(index=False)
 L=tr[tr.date>origin-pd.Timedelta(days=best['lvl'])].groupby('route').boardings.sum()/best['lvl']
+t8=build(tr[tr.date>origin-pd.Timedelta(weeks=best['sun_weeks'])]); PRS=t8[(t8.dow==6)&(t8.hol_wd==0)].groupby(['route','hour']).boardings.median().rename('ps').reset_index()   # воскресный профиль
 SETS=best['shape_sets']; models=[(fs,[fit_cb(tr,best,s,fs) for s in range(a.seeds)]) for fs in SETS]; PR=prof(tr,best['weeks'],best['prof_agg'])
 def pred(frb):
     f=frb.date.dt.to_period('M').map(fac).values
@@ -50,7 +51,10 @@ def pred(frb):
         X=frb[fs].copy(); X['route']=X.route.astype(int); per_set.append(np.mean([np.clip(m.predict(X),0,None) for m in ms],axis=0))
     cb=np.mean(per_set,axis=0)*frb.route.map(L).values*f
     pf=frb.merge(PR,on=['route','dow','hour'],how='left').p.fillna(0).values*f
-    w=np.where(frb.dow.values>=5,0.8,0.6); return np.where(frb.hol_wd.values==1,cb,w*cb+(1-w)*pf)
+    # смесь CatBoost / профиль: будни, выходные, ночные часы; праздничные будни — CatBoost + воскресный профиль
+    w=np.where(frb.dow.values>=5,best['w_we'],best['w_wd']); w=np.where(frb.hour.isin(best['night_hours']).values,best['w_night'],w)
+    ps=frb.merge(PRS,on=['route','hour'],how='left').ps.fillna(0).values*f
+    return np.where(frb.hol_wd.values==1,best['w_hol']*cb+(1-best['w_hol'])*ps,w*cb+(1-w)*pf)
 Fb=build(F); Fb['prediction']=pred(Fb)
 # рабочие субботы (перенос): среднее прогнозов пятницы и субботы
 for y in range(start.year,end.year+1):
