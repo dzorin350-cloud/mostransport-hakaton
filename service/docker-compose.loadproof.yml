@@ -1,4 +1,4 @@
-# Isolated, disposable API instance for concurrent ingest/read and recovery tests.
+# Isolated API instance and its database for concurrent ingest/read and recovery tests.
 # Run with a unique Compose project name; never point this at production volumes.
 # docker compose -p tram-load-proof -f docker-compose.yml -f docker-compose.loadproof.yml up -d --build api
 services:
