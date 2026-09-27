@@ -89,7 +89,8 @@ def _parse_62521(raw: bytes) -> pd.DataFrame:
     txt = raw.decode("utf-8-sig")
     if txt.lstrip().startswith("["):
         d = pd.read_json(io.StringIO(txt))
-        d = d.rename(columns={"Year": "year", "Month": "month_ru", "TypeOfTransport": "type", "PassengerTraffic": "pax"})
+        d = d.rename(columns={"Year": "year", "Month": "month_ru", "TransportType": "type",
+                              "TypeOfTransport": "type", "PassengerTraffic": "pax"})
     else:  # CSV выгрузка: вторая строка — русские заголовки
         d = pd.read_csv(io.StringIO(txt), sep=";").iloc[1:]
         d = d.rename(columns={"Year": "year", "Month": "month_ru", "Type of transport": "type", "Passenger traffic": "pax"})

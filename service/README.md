@@ -39,9 +39,9 @@ docker compose up -d --build            # 4 vCPU / 4 ГБ RAM, 4 воркера 
 docker compose -f docker-compose.yml -f docker-compose.2cpu.yml up -d --build
 ```
 
-- Дашборд: http://localhost:8080
-- API: http://localhost:8123 (или http://localhost:8080/api/... через прокси nginx)
-- Проверка: `curl http://localhost:8123/health`
+- Дашборд: http://127.0.0.1:8080
+- API: http://127.0.0.1:8123 (или http://127.0.0.1:8080/api/... через прокси nginx)
+- Проверка: `curl http://127.0.0.1:8123/health`
 
 Остановить: `docker compose down`.
 
@@ -120,14 +120,14 @@ docker compose -f docker-compose.yml -f docker-compose.2cpu.yml up -d --build
 Пример (полный сценарий с авторизацией — [`../docs/JURY.md`](../docs/JURY.md)):
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" "http://localhost:8123/forecast?date_from=2025-11-01&date_to=2025-11-07&route=17&granularity=day&coefficient=1.1"
+curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8123/forecast?date_from=2025-11-01&date_to=2025-11-07&route=17&granularity=day&coefficient=1.1"
 ```
 
 Горизонт — 12 месяцев от даты последних данных (сейчас 01.11.2025 – 31.10.2026); запрос вне горизонта
 получает 400 с понятным сообщением. В ответе `/forecast` есть `data_until` и `model_version`.
 Ноябрь–декабрь 2025 совпадает с отправленным сабмитом (0,88960) до 0,0043 %.
 
-Полная интерактивная документация (Swagger UI): http://localhost:8123/docs.
+Полная интерактивная документация (Swagger UI): http://127.0.0.1:8123/docs.
 
 ## Интерфейс
 

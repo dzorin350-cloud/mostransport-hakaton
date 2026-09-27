@@ -15,8 +15,8 @@ cd mostransport-hakaton/service
 docker compose up -d --build
 ```
 
-- **Интерфейс:** http://localhost:8080 — окно входа, **демо-аккаунт `demo` / `demo2025`** (или вкладка «Регистрация»).
-- **API:** http://localhost:8123, интерактивная документация Swagger — **http://localhost:8123/docs**.
+- **Интерфейс:** http://127.0.0.1:8080 — окно входа, **демо-аккаунт `demo` / `demo2025`** (или вкладка «Регистрация»).
+- **API:** http://127.0.0.1:8123, интерактивная документация Swagger — **http://127.0.0.1:8123/docs**.
 - Поднимаются три контейнера: `api` (модель, движок прогноза, API), `web` (интерфейс, nginx), `db` (PostgreSQL:
   пользователи, журнал решений, журнал приёма данных). Готовность — `docker compose ps` показывает `api … (healthy)`
   через ~30 с после старта.
@@ -49,7 +49,7 @@ docker compose up -d --build
 ## API через curl
 
 ```bash
-B=http://localhost:8123
+B=http://127.0.0.1:8123
 TOKEN=$(curl -s -X POST $B/auth/token -d 'username=demo&password=demo2025' | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
 H="Authorization: Bearer $TOKEN"
 
