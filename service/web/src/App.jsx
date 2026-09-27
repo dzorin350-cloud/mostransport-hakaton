@@ -174,6 +174,8 @@ export function App() {
   const [lastData, setLastData] = useState(null);
   const [modelInfo, setModelInfo] = useState(null);
   const [demoDate, setDemoDate] = useState("");
+  // час «сейчас» — московский, как часы в шапке (не часовой пояс браузера)
+  const mskHour = () => Number(new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", hourCycle: "h23", timeZone: "Europe/Moscow" }).format(new Date()));
   const [nowData, setNowData] = useState(null);
   const [alertsData, setAlertsData] = useState({ alerts: [] });
   const [fleetData, setFleetData] = useState(null);
@@ -437,9 +439,9 @@ export function App() {
       catch (e) { toast("Не удалось загрузить раздел", e.message || "Повторите запрос", "warn"); }
     };
     if (view === "now" || view === "overview") {
-      const q = new URLSearchParams({ hour: String(new Date().getHours()), date: demoDate || horizon.start, coefficient: coef });
+      const q = new URLSearchParams({ hour: String(mskHour()), date: demoDate || horizon.start, coefficient: coef });
       selectedRoutes.forEach((route) => q.append("route", route));
-      load(`/now?${q}`, setNowData); load(`/alerts?hour=${new Date().getHours()}&date=${demoDate || horizon.start}&coefficient=${coef}`, setAlertsData);
+      load(`/now?${q}`, setNowData); load(`/alerts?hour=${mskHour()}&date=${demoDate || horizon.start}&coefficient=${coef}`, setAlertsData);
     }
     if (view === "fleet") load(`/fleet?${params}`, setFleetData);
     if (view === "plan") { const end = new Date(Math.min(new Date(dateFrom).getTime() + 6 * 86400000, new Date(horizon.end).getTime())).toISOString().slice(0, 10); load(`/plan?date_from=${dateFrom}&date_to=${end}&coefficient=${coef}${selectedRoutes.map((r) => `&route=${r}`).join("")}`, setPlanData); }
