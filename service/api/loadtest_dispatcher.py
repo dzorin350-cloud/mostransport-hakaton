@@ -4,8 +4,34 @@ The test intentionally has no writes: ingestion must be tested on a disposable
 copy of the history, with a separate concurrent writer and restore check.
 """
 import random
+import csv
+import os
+import time
 
-from locust import HttpUser, between, task
+from locust import HttpUser, between, events, task
+
+
+# Optional per-request evidence for the ingest/refresh experiment. Kept in memory
+# so the load generator does not write to disk on every request.
+_request_log = []
+FORECAST_DAY_MIN = int(os.environ.get("TRAM_FORECAST_DAY_MIN", "1"))
+
+
+@events.request.add_listener
+def record_request(request_type, name, response_time, exception, **_kwargs):
+    if os.environ.get("TRAM_REQUEST_LOG"):
+        _request_log.append((time.time(), request_type, name, response_time, bool(exception)))
+
+
+@events.quitting.add_listener
+def save_request_log(environment, **_kwargs):
+    path = os.environ.get("TRAM_REQUEST_LOG")
+    if not path:
+        return
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("completed_at_unix", "method", "name", "response_time_ms", "failed"))
+        writer.writerows(_request_log)
 
 
 class DispatcherUser(HttpUser):
@@ -18,7 +44,7 @@ class DispatcherUser(HttpUser):
 
     @task(8)
     def hourly(self):
-        day = f"2025-11-{random.randint(1, 28):02d}"
+        day = f"2025-11-{random.randint(FORECAST_DAY_MIN, 28):02d}"
         self.client.get("/forecast", params={"date_from": day, "date_to": day, "route": random.choice([1, 7, 17, 25, 50])},
                         name="/forecast hourly route/day")
 
