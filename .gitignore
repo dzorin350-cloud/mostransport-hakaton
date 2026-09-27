@@ -7,3 +7,5 @@ __pycache__/
 .claude/
 service/api/.venv/
 catboost_info/
+service/web/node_modules/
+service/web/dist/
