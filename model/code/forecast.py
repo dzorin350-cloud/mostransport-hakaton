@@ -58,6 +58,9 @@ for y in range(start.year,end.year+1):
         if c!='1' and d.dayofweek==5 and start<=d<=end:
             n=Fb.date.eq(d); fri=Fb[n].copy(); fri['dow']=4; fri['off']=0; sat=Fb[n].copy(); sat['dow']=5; sat['off']=1
             Fb.loc[n,'prediction']=0.5*pred(fri)+0.5*pred(sat)
+# сезонность маршрута (β, сжатие λ) — как в final.py
+beta=route_beta(tr); kr=[route_factor(beta,r,fac[p],best['route_season_lambda']) for r,p in zip(Fb.route,Fb.date.dt.to_period('M'))]
+Fb['prediction']=Fb.prediction*np.array(kr)
 out=Fb[['route','date','hour','prediction']].copy()
 r5=pd.DataFrame([(5,d,h,0.0) for d in days for h in range(24)],columns=out.columns); out=pd.concat([out,r5]).sort_values(['route','date','hour'])
 out['date']=out.date.dt.strftime('%Y-%m-%d'); out['prediction']=out.prediction.round(1).clip(lower=0)

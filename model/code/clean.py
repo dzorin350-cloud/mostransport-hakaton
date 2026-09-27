@@ -5,6 +5,24 @@ best=dict(DEF); best.update(json.load(open(os.path.join(os.path.dirname(os.path.
 def seas(o,months):
     yrs=[y for y in P.index if y<o.year and y!=2020 and not P.loc[y,[o.month]+months].isna().any()]
     return {m:float(np.mean([P.loc[y,m]/P.loc[y,o.month] for y in yrs])) for m in months}
+def route_beta(tr):
+    """чувствительность маршрута к сезонности города: log(месяц маршрута / месяц старта) ≈ β·log(то же по городу),
+    по полным месяцам истории (≥ 20 дней); маршрут без двух таких месяцев — без поправки"""
+    o=tr.date.max(); O=pd.Period(o,'M')
+    d=tr.assign(per=tr.date.dt.to_period('M')).groupby(['route','per']).agg(s=('boardings','sum'),n=('date','nunique')).reset_index()
+    d=d[d.n>=20]; d['pd']=d.s/d.n; out={}
+    for r,g in d.groupby('route'):
+        g=g.set_index('per')
+        if O not in g.index: continue
+        ps=[x for x in g.index if x!=O and x.year in P.index and not np.isnan(P.loc[x.year,x.month])]
+        if len(ps)<2: continue
+        y=np.log(g.loc[ps,'pd']/g.loc[O,'pd']).values
+        x=np.log(np.array([P.loc[q.year,q.month]/P.loc[O.year,O.month] for q in ps]))
+        out[r]=float((x*y).sum()/(x*x).sum())
+    return out
+def route_factor(beta,r,f,lam):
+    """множитель маршрута к городской сезонности f: f^(β'−1), β' = 1 + λ(β − 1) (сжатие к городу)"""
+    return f**(lam*(beta.get(r,1.0)-1))
 def dtype(dates):
     dow=dates.dt.dayofweek; return np.where(dates.isin(DAYOFF),'hol',np.where(dow<5,'wd',np.where(dow==5,'sat','sun')))
 def clean_grid(tr,thr=1.3,wk_thr=0.15,protect_weeks=4):

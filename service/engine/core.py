@@ -7,7 +7,7 @@
   4. считает уровень маршрута (последние 56 дней) и профиль (последние 4 недели, медиана);
   5. загружает 10 обученных моделей CatBoost (два набора признаков: базовый и с длиной светового дня; train.py) и строит почасовой прогноз
      на 12 месяцев вперёд от даты данных:
-       прогноз = уровень × форма дня (CatBoost + профиль) × сезонный множитель месяца;
+       прогноз = уровень × форма дня (CatBoost + профиль) × сезонный множитель месяца (с поправкой β маршрута);
      годовая часть: для месяцев, у которых в истории есть тот же месяц год назад, форма дня
      смешивается с формой того месяца (доля SHAPE_ALPHA).
 Обучения здесь нет. Модели CatBoost — артефакты в artifacts/.
@@ -159,6 +159,27 @@ class Engine:
 
     # ---------------------------------------------------------------- множители месяцев
     @staticmethod
+    def route_beta(tr: pd.DataFrame, rid: pd.DataFrame, base: pd.Period) -> dict:
+        """Чувствительность маршрута к сезонности города: log(месяц маршрута / базовый) ≈ β·log(то же по городу),
+        по полным месяцам истории (≥ 20 дней). Маршрут без двух таких месяцев — без поправки (β = 1)."""
+        s = pd.Series(rid.pax.values / [_cal.monthrange(y, m)[1] for y, m in zip(rid.year, rid.month)],
+                      index=pd.PeriodIndex([f"{y}-{m:02d}" for y, m in zip(rid.year, rid.month)], freq="M"))
+        d = tr.assign(per=tr.date.dt.to_period("M")).groupby(["route", "per"]).agg(s=("boardings", "sum"), n=("date", "nunique")).reset_index()
+        d = d[d.n >= 20]; d["pd"] = d.s / d.n
+        out = {}
+        for r, g in d.groupby("route"):
+            g = g.set_index("per")
+            if base not in g.index or base not in s.index:
+                continue
+            ps = [x for x in g.index if x != base and x in s.index]
+            if len(ps) < 2:
+                continue
+            y = np.log(g.loc[ps, "pd"] / g.loc[base, "pd"]).values
+            x = np.log(np.array([s[q] / s[base] for q in ps]))
+            out[int(r)] = float((x * y).sum() / (x * x).sum())
+        return out
+
+    @staticmethod
     def month_multipliers(rid: pd.DataFrame, origin: pd.Period, horizon: int) -> dict:
         s = pd.Series(rid.pax.values / [_cal.monthrange(y, m)[1] for y, m in zip(rid.year, rid.month)],
                       index=pd.PeriodIndex([f"{y}-{m:02d}" for y, m in zip(rid.year, rid.month)], freq="M"))
@@ -195,6 +216,8 @@ class Engine:
         base = min(pd.Period(last_full, "M"), pd.Period(f"{int(rid.year.iloc[-1])}-{int(rid.month.iloc[-1]):02d}", "M"))
         mult = self.month_multipliers(rid, base, (origin + HORIZON_MONTHS - base).n)
         tr, flags = clean_history(hist, cal)
+        lam = float(p.get("route_season_lambda", 0.0))
+        beta = self.route_beta(tr, rid, base)
         L = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(days=p["lvl"])].groupby("route").boardings.sum() / p["lvl"]
         pt = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(weeks=p["weeks"])].merge(cal.features(tr.date), on="date")
         PR = pt[pt.hol_wd == 0].groupby(["route", "dow", "hour"]).boardings.agg(p.get("prof_agg", "mean")).rename("p").reset_index()
@@ -215,6 +238,8 @@ class Engine:
 
         def pred(frb: pd.DataFrame) -> np.ndarray:
             f = frb.date.dt.to_period("M").map(mult).values.astype(float)
+            # сезонность маршрута: городской множитель → f^(1 + λ(β − 1))
+            f = f * f ** (lam * (frb.route.map(beta).fillna(1.0).values - 1))
             shapes = []
             for fs, ms in self.model_sets:
                 X = frb[fs].copy(); X["route"] = X.route.astype(int)
@@ -282,6 +307,7 @@ class Engine:
             "horizon": {"start": str(h_start), "end": str(h_end)},
             "month_multipliers": {str(k): round(v, 4) for k, v in mult.items() if k >= pd.Period(h_start, "M")},
             "multiplier_base_month": str(base),
+            "route_beta": {str(k): round(v, 3) for k, v in beta.items()}, "route_season_lambda": lam,
             "year_shape_months": blended_months,
             "year_shape_alpha": SHAPE_ALPHA,
             "cleaned_route_days": int(flags.m.sum()),

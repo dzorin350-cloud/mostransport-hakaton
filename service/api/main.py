@@ -58,7 +58,7 @@ STARTUP_WAIT_S = float(os.environ.get("STARTUP_WAIT_S", "600"))
 
 app = FastAPI(
     title="Прогноз пассажиропотока трамваев Москвы",
-    description="Итоговая модель (WAPE-score 0.88835) + годовая форма дня. Почасовой прогноз посадок, горизонт 12 месяцев.",
+    description="Итоговая модель (WAPE-score 0.88960) + годовая форма дня. Почасовой прогноз посадок, горизонт 12 месяцев.",
     version="2.0.0",
 )
 app.include_router(auth_router)
@@ -219,7 +219,7 @@ def metrics() -> dict:
         "avg_latency_ms": round(avg, 3),
         "uptime_s": round(time.monotonic() - _boot_time, 1),
         "model": FC.info.get("model_version"),
-        "leaderboard_wape_score": 0.88835,
+        "leaderboard_wape_score": 0.88960,
         "data_until": FC.info.get("data_until"),
         "forecast_computed_at": FC.info.get("computed_at"),
     }
