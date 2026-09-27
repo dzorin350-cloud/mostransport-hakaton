@@ -3,7 +3,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN cd v7/code && python build_grid.py
+RUN mkdir -p v7/output && cd v7/code && python build_grid.py
 WORKDIR /app/v7/code
 # по умолчанию: обновить внешние данные и построить прогноз на ноябрь–декабрь 2025
 ENTRYPOINT ["python", "forecast.py", "--refresh"]
