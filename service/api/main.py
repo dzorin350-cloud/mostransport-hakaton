@@ -600,10 +600,10 @@ def _daytype(dates) -> list:
     out = []
     for d in pd.to_datetime(pd.Series(dates).astype(str)):
         if d.year not in _CAL:
-            f = STATE / "cache" / f"cal_{d.year}.txt"
-            if not f.exists():
-                f = Path("/app/service/engine/fallback") / f"cal_{d.year}.txt"
-            _CAL[d.year] = f.read_text().strip() if f.exists() else ""
+            here = Path(__file__).resolve().parent            # /app в контейнере, service/api в репозитории
+            cands = [STATE / "cache", here / "service" / "engine" / "fallback", here.parent / "engine" / "fallback"]
+            f = next((c / f"cal_{d.year}.txt" for c in cands if (c / f"cal_{d.year}.txt").exists()), None)
+            _CAL[d.year] = f.read_text().strip() if f else ""
         codes = _CAL[d.year]
         c = codes[d.dayofyear - 1] if len(codes) >= d.dayofyear else ("1" if d.dayofweek >= 5 else "0")
         if c == "1" and d.dayofweek < 5:
@@ -638,7 +638,9 @@ def _fleet_cached(version, date_from, date_to, route, hour_from, hour_to, coeffi
     lo, hi = _interval("hour", df["date"]); df["lo"] = df.prediction * lo; df["hi"] = df.prediction * hi
     days = sorted(df["date"].unique()); dt_map = dict(zip(days, _daytype(days)))
     df["dt"] = df["date"].map(dt_map)
-    df = df.merge(FLEET, on=["route", "dt", "hour"], how="left")
+    # норм для праздничных будней нет (мало таких дней в истории) — выпуск в праздник по воскресному графику
+    df["norm_dt"] = df["dt"].replace({"hol": "sun"})
+    df = df.merge(FLEET.rename(columns={"dt": "norm_dt"}), on=["route", "norm_dt", "hour"], how="left")
     df["veh_typ"] = df["veh_typ"].fillna(0)
     df["bpv"] = np.where(df.veh_typ > 0, df.prediction / df.veh_typ.replace(0, np.nan), np.nan)
     df["load_index"] = df.bpv / df.bpv_p90

@@ -1,4 +1,10 @@
-"""Smoke tests for versioned forecast, planning, decisions and idempotent ingest."""
+"""Smoke tests for versioned forecast, planning, decisions and idempotent ingest.
+
+Нужен PostgreSQL: TEST_DATABASE_URL (или DATABASE_URL), например
+  docker run -d --name tram-test-db -e POSTGRES_USER=tram -e POSTGRES_PASSWORD=tram -e POSTGRES_DB=tram_test -p 55432:5432 postgres:17-alpine
+  TEST_DATABASE_URL=postgresql://tram:tram@localhost:55432/tram_test python -m unittest service/api/tests/test_dispatcher.py
+Таблицы users, decisions, ingest_batches в этой базе очищаются перед тестами.
+"""
 import datetime as dt
 import json
 import os
@@ -23,17 +29,23 @@ os.environ.update({
     "FLEET_PATH": str(ROOT / "service" / "engine" / "artifacts" / "fleet_norms.csv"),
     "STOPS_PATH": str(ROOT / "service" / "engine" / "artifacts" / "stops.csv"),
     "INTERVALS_PATH": str(ROOT / "service" / "engine" / "artifacts" / "interval_factors.csv"),
+    "DATABASE_URL": os.environ.get("TEST_DATABASE_URL") or os.environ["DATABASE_URL"],
     "NOW_MODE": "demo", "DEMO_TODAY": "2025-11-01", "DEMO_USER": "demo", "DEMO_PASSWORD": "demo2025",
 })
 version = BASE / "state" / "versions" / "1-12345678"
 version.mkdir(parents=True)
 day = dt.date(2025, 11, 1)
-pd.DataFrame([{"route": route, "date": day, "hour": hour, "prediction": 100.0}
+holiday = dt.date(2025, 11, 4)                     # День народного единства, вторник
+pd.DataFrame([{"route": route, "date": d, "hour": hour, "prediction": 100.0} for d in (day, holiday)
               for route in (1, 5, 7, 11, 12, 17, 25, 26, 28, 50) for hour in range(24)]).to_parquet(version / "forecast.parquet")
 (version / "info.json").write_text(json.dumps({"model_version": "test", "data_until": "2025-10-31",
-    "horizon": {"start": "2025-11-01", "end": "2025-11-01"}, "rain_adjusted_days": []}), encoding="utf-8")
+    "horizon": {"start": "2025-11-01", "end": "2025-11-04"}, "rain_adjusted_days": []}), encoding="utf-8")
 (BASE / "state" / "current.json").write_text('{"version":"1-12345678"}', encoding="utf-8")
 sys.path.insert(0, str(ROOT / "service" / "api"))
+import psycopg  # noqa: E402
+with psycopg.connect(os.environ["DATABASE_URL"]) as _con:
+    for _t in ("users", "decisions", "ingest_batches"):
+        _con.execute(f"DROP TABLE IF EXISTS {_t}")
 import main  # noqa: E402
 
 
@@ -57,6 +69,19 @@ class DispatcherTest(unittest.TestCase):
         export = self.client.get("/plan/export?date_from=2025-11-01&date_to=2025-11-01", headers=self.headers)
         self.assertEqual(export.status_code, 200, export.text)
         self.assertTrue(export.content.startswith(b"PK"))
+
+    def test_plan_on_holiday_uses_sunday_norms(self):
+        hol = self.client.get("/plan?date_from=2025-11-04&date_to=2025-11-04", headers=self.headers)
+        self.assertEqual(hol.status_code, 200, hol.text)
+        body = hol.json()
+        self.assertGreater(body["total"]["vehicle_hours_typical"], 0)
+        self.assertEqual({r["reason"] for r in body["rows"]}, {"праздничный день"})
+        norms = main.FLEET[(main.FLEET.dt == "sun") & (main.FLEET.route == 17) & (main.FLEET.hour == 8)].veh_typ.iloc[0]
+        row = next(r for r in body["rows"] if r["route"] == 17 and r["hour"] == 8)
+        self.assertEqual(row["veh_typ"], norms)
+        fleet = self.client.get("/fleet?date_from=2025-11-04&date_to=2025-11-04", headers=self.headers)
+        self.assertEqual(fleet.status_code, 200, fleet.text)
+        self.assertGreater(fleet.json()["total"]["vehicle_hours_typical"], 0)
 
     def test_now_alerts_and_stops(self):
         base = self.client.get("/now?date=2025-11-01&hour=8", headers=self.headers)

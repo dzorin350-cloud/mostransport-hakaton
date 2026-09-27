@@ -17,6 +17,11 @@ services:
       # Демо-время: дата «сегодня» — первый день прогноза (01.11.2025), время суток — пользователя. В проде NOW_MODE=real.
       NOW_MODE: "demo"
       DEMO_TODAY: ""
+      # Пользователи, журнал решений диспетчера и журнал приёма данных — PostgreSQL (контейнер db).
+      DATABASE_URL: postgresql://tram:${TRAM_DB_PASSWORD:-tram-local-only}@db:5432/tram
+    depends_on:
+      db:
+        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -26,7 +31,7 @@ services:
     volumes:
       - ../labels:/app/history:ro
       - ingest:/app/ingest           # данные, принятые через POST /ingest/* (переживают перезапуск)
-      - auth:/app/auth               # пользователи (SQLite) и секрет токенов
+      - auth:/app/auth               # секрет токенов (если не задан AUTH_SECRET)
       - state:/app/state             # версии прогноза, архив и кэш переживают пересоздание контейнера
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
@@ -44,7 +49,23 @@ services:
     depends_on:
       - api
 
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tram
+      POSTGRES_USER: tram
+      POSTGRES_PASSWORD: ${TRAM_DB_PASSWORD:-tram-local-only}   # в проде задать TRAM_DB_PASSWORD
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tram -d tram"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
+  postgres:
   ingest:
   auth:
   state:

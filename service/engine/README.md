@@ -63,7 +63,8 @@
 | `HISTORY_DIR` | `/app/history` | история валидаций (монтируется томом, пополняется) |
 | `STATE_DIR` / `OUT_DIR` | `/app/state` | куда публикуется прогноз |
 | `INGEST_DIR` | `/app/ingest` | данные, принятые через API (том `ingest`) |
-| `AUTH_DIR` | `/app/auth` | пользователи SQLite и секрет токенов (том `auth`); `AUTH_SECRET` — задать секрет явно |
+| `AUTH_DIR` | `/app/auth` | секрет токенов (том `auth`); `AUTH_SECRET` — задать секрет явно |
+| `DATABASE_URL` | — (обязательна) | PostgreSQL: пользователи, журнал решений, журнал приёма; в Compose — контейнер `db` |
 | `REFRESH_HOURS` | 24 | плановый пересчёт |
 | `CHECK_SECONDS` | 60 | как часто проверять новые файлы истории |
 | `WORKERS` | 4 | воркеры API (= числу vCPU) |
