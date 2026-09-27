@@ -1,6 +1,6 @@
 # ML-модель: артефакты, код обучения и инференса, запуск
 
-**Модель v7 — WAPE-score 0,88399 на лидерборде** (прогноз 01.11–31.12.2025, 14 640 строк «маршрут × дата × час»).
+**Итоговая модель — WAPE-score 0,88399 на лидерборде** (прогноз 01.11–31.12.2025, 14 640 строк «маршрут × дата × час»).
 Как модель устроена и почему так — [ARCHITECTURE.md](../ARCHITECTURE.md); все проверки — [TESTS.md](TESTS.md).
 
 **Прогноз = уровень маршрута × форма дня × сезонный множитель месяца.**
@@ -14,12 +14,12 @@
 |---|---|---|
 | **Артефакты модели (в сервисе)** | [`service/engine/artifacts/`](../service/engine/artifacts/) | 5 моделей CatBoost `catboost_seed0…4.cbm`, `config.json` (параметры, дата обучения), нормы вагонов `fleet_norms.csv`, коэффициенты коридора `interval_factors.csv`, остановки `stops.csv` / `stops.geojson` |
 | Встроенные копии внешних данных | [`service/engine/fallback/`](../service/engine/fallback/) | календарь 2022–2027, сезонность трамвая по месяцам (только до октября 2025) — если источник недоступен |
-| **Код обучения** | [`v7/code/`](../v7/code/) | `build_grid.py` — почасовая сетка из `labels/`; `clean.py` — очистка обучения; `model.py` — календарь и признаки; `pipe.py` — CatBoost, профиль, сезонность; `best_params_final.json` — гиперпараметры (Optuna, 148 проб) |
-| Обучение моделей для сервиса | [`service/engine/train.py`](../service/engine/train.py) | тот же код v7 → 5 моделей в `artifacts/` |
+| **Код обучения** | [`model/code/`](../model/code/) | `build_grid.py` — почасовая сетка из `labels/`; `clean.py` — очистка обучения; `model.py` — календарь и признаки; `pipe.py` — CatBoost, профиль, сезонность; `best_params_final.json` — гиперпараметры (Optuna, 148 проб) |
+| Обучение моделей для сервиса | [`service/engine/train.py`](../service/engine/train.py) | тот же код итоговой модели → 5 моделей в `artifacts/` |
 | **Код инференса (сервис)** | [`service/engine/`](../service/engine/) | `core.py` — применение модели к истории, календарь, сезонность, годовая форма дня, поправка на дождь; `sources.py` — загрузка внешних данных (живой источник → кэш → встроенная копия); `refresher.py` — пересчёт при новых данных и публикация версии |
-| Инференс пакетом (без сервиса) | [`v7/code/forecast.py`](../v7/code/forecast.py) | прогноз на любой период до 12 месяцев в CSV |
-| **Отправленный сабмит** | [`v7/submission_v7.csv`](../v7/submission_v7.csv), [`v7/submission_v7.md5`](../v7/submission_v7.md5) | файл лидерборда 0,88399 и его контрольная сумма |
-| Воспроизведение сабмита | [`v7/code/final_v7.py`](../v7/code/final_v7.py) | заморожённый финальный запуск |
+| Инференс пакетом (без сервиса) | [`model/code/forecast.py`](../model/code/forecast.py) | прогноз на любой период до 12 месяцев в CSV |
+| **Отправленный сабмит** | [`model/submission.csv`](../model/submission.csv), [`model/submission.md5`](../model/submission.md5) | файл лидерборда 0,88399 и его контрольная сумма |
+| Воспроизведение сабмита | [`model/code/final.py`](../model/code/final.py) | заморожённый финальный запуск |
 | Исходные данные | [`labels/`](../labels/) | почасовые посадки январь–октябрь 2025 (агрегат `train.csv` + `test.csv` организаторов) |
 
 ## Запуск
@@ -28,19 +28,19 @@
 
 **1. Воспроизвести отправленный сабмит (байт в байт):**
 ```bash
-cd v7/code
+cd model/code
 python build_grid.py            # labels/ → data/grid.parquet
-python final_v7.py              # обучение 5 CatBoost + прогноз → v7/output/submission_v7.csv
-md5sum ../output/submission_v7.csv   # совпадает с v7/submission_v7.md5
+python final.py              # обучение 5 CatBoost + прогноз → model/output/submission.csv
+md5sum ../output/submission.csv   # совпадает с model/submission.md5
 ```
 
 **2. Прогноз на произвольный период (до 12 месяцев вперёд):**
 ```bash
-cd v7/code
+cd model/code
 python forecast.py --start 2025-11-01 --end 2026-10-31 --out ../output/forecast.csv            # по встроенным внешним данным
 python forecast.py --start 2025-11-01 --end 2025-12-31 --refresh                                # предварительно обновить календарь и сезонность
 ```
-То же в Docker из корня репозитория: `docker build -t tram-v7 . && docker run --rm tram-v7`.
+То же в Docker из корня репозитория: `docker build -t tram-model . && docker run --rm tram-model`.
 
 **3. Переобучить модели сервиса** (после новых данных или появления маршрута):
 ```bash
@@ -73,6 +73,6 @@ python -m service.engine.train   # из корня репозитория; мо�
 | Бэктесты май–июнь / июль–август | 0,8722 / 0,8406 |
 | Реальный октябрь в сервисе, еженедельные обновления | 0,9038 (без обновлений 0,8952) |
 | Сервис против сабмита, ноябрь–декабрь | расхождение 0,0023 % суммы (скор тот же) |
-| Воспроизводимость | `final_v7.py` даёт `submission_v7.csv` байт в байт |
+| Воспроизводимость | `final.py` даёт `submission.csv` байт в байт |
 
 Утечки нет: факты ноября–декабря 2025 (посадки, погода, городская статистика) в обучении и прогнозе не используются.

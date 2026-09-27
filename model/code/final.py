@@ -18,8 +18,8 @@ sub=Fb[['route','date','hour','prediction']].copy(); sub['date']=sub.date.dt.str
 r5=pd.DataFrame([(5,d.strftime('%Y-%m-%d'),h,0.0) for d in days for h in range(24)],columns=sub.columns); sub=pd.concat([sub,r5])
 ref=pd.read_csv(D_+'test_submission.csv',sep=';'); sub=ref[['route','date','hour']].merge(sub,on=['route','date','hour'],how='left')
 assert len(sub)==14640 and sub.prediction.notna().all() and (sub.prediction>=0).all()
-sub.to_csv(os.path.join(D_,'..','output','submission_v7.csv'),sep=';',index=False)
-v4=pd.read_csv(D_+'submission_v4.csv',sep=';'); print("сумма v4",round(v4.prediction.sum()),"v7",round(sub.prediction.sum()),"| |v7-v4|/v4 %",round((sub.prediction-v4.prediction).abs().sum()/v4.prediction.sum()*100,2))
+sub.to_csv(os.path.join(D_,'..','output','submission.csv'),sep=';',index=False)
+v4=pd.read_csv(D_+'submission_v4.csv',sep=';'); print("сумма v4",round(v4.prediction.sum()),"итоговая",round(sub.prediction.sum()),"| |итоговая-v4|/v4 %",round((sub.prediction-v4.prediction).abs().sum()/v4.prediction.sum()*100,2))
 d=sub.assign(date=pd.to_datetime(sub.date),v4=v4.prediction); d['we']=d.date.dt.dayofweek>=5
 print((d.groupby(['route','we'])[['v4','prediction']].sum().unstack().div(d.groupby(['route','we']).date.nunique().unstack().reindex(columns=[False,True]).values.repeat(1,axis=0).tolist() if False else 1)).round(0).head(0))
 print(d.groupby(['route',d.date.dt.month])[['v4','prediction']].sum().unstack().round(-3).to_string())
