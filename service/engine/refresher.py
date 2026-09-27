@@ -14,6 +14,9 @@ from .core import Engine
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("engine.refresher")
 HIST = Path(os.environ.get("HISTORY_DIR", "/app/history")); INGEST = Path(os.environ.get("INGEST_DIR", "/app/ingest")); OUT = Path(os.environ.get("OUT_DIR", "/app/state"))
+# Демо для экрана «Качество прогноза»: архивные прогнозы, сделанные по истории до этих дат (как еженедельные обновления
+# в октябре 2025), сравниваются с фактом октября из истории. Строятся один раз в фоне; основной прогноз не меняют. Пусто — выключено.
+DEMO_CUTOFFS = [c.strip() for c in os.environ.get("DEMO_ACCURACY_CUTOFFS", "").split(",") if c.strip()]
 REFRESH_H = float(os.environ.get("REFRESH_HOURS", "24")); CHECK_S = float(os.environ.get("CHECK_SECONDS", "60"))
 
 
@@ -51,6 +54,25 @@ def run_once(engine: Engine):
     _status({"ok": True, "at": info["computed_at"]})
 
 
+def seed_demo_archive():
+    for until in DEMO_CUTOFFS:
+        arch = OUT / "archive" / f"forecast_until_{until}.parquet"
+        if arch.exists():
+            continue
+        try:
+            e = Engine([HIST, INGEST], cache_dir=OUT / "cache", until=until, weather=False)   # погода задним числом — утечка
+            info = e.refresh()
+            if info["data_until"] != until:
+                log.warning("демо-архив %s: в истории нет данных на эту дату (последняя %s), пропуск", until, info["data_until"])
+                continue
+            (OUT / "archive").mkdir(parents=True, exist_ok=True)
+            tmp = arch.with_suffix(".parquet.tmp")
+            e.table.to_parquet(tmp, index=False); os.replace(tmp, arch)
+            log.info("демо-архив для «Качества прогноза»: прогноз по данным до %s", until)
+        except Exception:
+            log.exception("демо-архив %s не построен", until)
+
+
 def main():
     engine = Engine([HIST, INGEST], cache_dir=OUT / "cache")
     stamp, last = None, 0.0
@@ -59,6 +81,7 @@ def main():
             s = hist_stamp()
             if s != stamp or time.time() - last > REFRESH_H * 3600:
                 run_once(engine); stamp, last = s, time.time()
+                seed_demo_archive()
         except Exception as exc:
             log.exception("ошибка пересчёта; прошлый прогноз остаётся в силе")
             OUT.mkdir(parents=True, exist_ok=True)

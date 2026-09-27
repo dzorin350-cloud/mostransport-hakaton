@@ -8,5 +8,7 @@ services:
     environment:
       CHECK_SECONDS: "2"
       REFRESH_HOURS: "24"
+      # Historical demo archives are unrelated to the ingest/refresh experiment.
+      DEMO_ACCURACY_CUTOFFS: ""
   web:
     profiles: ["not-needed-for-loadproof"]

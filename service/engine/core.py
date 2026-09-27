@@ -1,13 +1,13 @@
-"""Движок прогноза: применяет обученную модель v7 к истории валидаций и внешним данным.
+"""Движок прогноза: применяет обученную итоговую модель к истории валидаций и внешним данным.
 
 Что делает refresh():
   1. читает историю (почасовые посадки маршрут × дата × час) и определяет дату последних данных;
   2. сам скачивает внешние данные (sources.py): производственный календарь и месячный пассажиропоток трамвая;
-  3. очищает историю от аномалий (перекрытия, объединения маршрутов, сбои) — как в v7;
-  4. считает уровень маршрута (последние 56 дней) и профиль (последние 2 недели);
-  5. загружает 5 обученных моделей CatBoost (обучаются офлайн, train.py) и строит почасовой прогноз
+  3. очищает историю от аномалий (перекрытия, объединения маршрутов, сбои) — как в итоговой модели;
+  4. считает уровень маршрута (последние 56 дней) и профиль (последние 4 недели, медиана);
+  5. загружает 10 обученных моделей CatBoost (два набора признаков: базовый и с длиной светового дня; train.py) и строит почасовой прогноз
      на 12 месяцев вперёд от даты данных:
-       прогноз = уровень × форма дня (CatBoost + профиль) × сезонный множитель месяца;
+       прогноз = уровень × форма дня (CatBoost + профиль) × сезонный множитель месяца (с поправкой β маршрута);
      годовая часть: для месяцев, у которых в истории есть тот же месяц год назад, форма дня
      смешивается с формой того месяца (доля SHAPE_ALPHA).
 Обучения здесь нет. Модели CatBoost — артефакты в artifacts/.
@@ -66,7 +66,7 @@ class Calendar:
         return [d for d in pd.date_range(d0, d1).date if d.weekday() >= 5 and not self.is_off(d)]
 
     def features(self, dates) -> pd.DataFrame:
-        """Признаки дня, как в v7: dow, off, hol_wd, pre, post."""
+        """Признаки дня, как в итоговой модели: dow, off, hol_wd, pre, post, daylen (длина светового дня)."""
         ds = pd.to_datetime(pd.Series(pd.unique(pd.Series(dates))))
         c = pd.DataFrame({"date": ds})
         c["dow"] = c.date.dt.dayofweek
@@ -77,6 +77,9 @@ class Calendar:
         prv = [int(self.is_off(x - dt.timedelta(1)) or (x - dt.timedelta(1)).weekday() >= 5) for x in d]
         c["pre"] = ((np.array(nxt) == 1) & (c.off == 0)).astype(int)
         c["post"] = ((np.array(prv) == 1) & (c.off == 0)).astype(int)
+        doy = c.date.dt.dayofyear.values; lat = np.radians(55.75)          # Москва, 55.75° с. ш.
+        decl = np.radians(23.44) * np.sin(2 * np.pi * (284 + doy) / 365)
+        c["daylen"] = 2 * np.degrees(np.arccos(np.clip(-np.tan(lat) * np.tan(decl), -1, 1))) / 15
         return c
 
     def daytype(self, dates: pd.Series) -> np.ndarray:
@@ -87,7 +90,7 @@ class Calendar:
         return np.where(hol, "hol", np.where(dow < 5, "wd", np.where(dow == 5, "sat", "sun")))
 
 
-# ============================================================================ очистка (как v7)
+# ============================================================================ очистка (как в итоговой модели)
 def clean_history(tr: pd.DataFrame, cal: Calendar, thr=1.5, wk_thr=0.15) -> tuple[pd.DataFrame, pd.DataFrame]:
     d = tr.groupby(["route", "date"]).boardings.sum().reset_index()
     d["dt"] = cal.daytype(d.date)
@@ -117,15 +120,23 @@ def clean_history(tr: pd.DataFrame, cal: Calendar, thr=1.5, wk_thr=0.15) -> tupl
 # ============================================================================ движок
 class Engine:
     def __init__(self, history_dir, artifacts_dir: Path = HERE / "artifacts",
-                 cache_dir: Path = Path("/tmp/tram_engine_cache"), fetch: bool = True):
+                 cache_dir: Path = Path("/tmp/tram_engine_cache"), fetch: bool = True, until: str | None = None,
+                 weather: bool = True):
         dirs = history_dir if isinstance(history_dir, (list, tuple)) else [history_dir]
         self.history_dirs = [Path(d) for d in dirs]
         self.artifacts_dir, self.cache_dir, self.fetch = Path(artifacts_dir), Path(cache_dir), fetch
+        self.until = pd.Timestamp(until) if until else None     # обрезка истории: прогноз «как если бы данные были только до этой даты»
+        self.weather = weather                                  # False — без поправки на дождь (архивные прогнозы для демо)
         self.config = json.loads((self.artifacts_dir / "config.json").read_text())
         self.routes_all = self.config["routes_all"]
-        self.models = []
-        for f in self.config["models"]:
-            m = CatBoostRegressor(); m.load_model(str(self.artifacts_dir / f)); self.models.append(m)
+        # наборы моделей формы дня: у каждого свой список признаков; прогноз — среднее по моделям набора, затем по наборам
+        sets = self.config.get("model_sets") or [{"feats": FEATS, "models": self.config["models"]}]
+        self.model_sets = []
+        for s in sets:
+            ms = []
+            for f in s["models"]:
+                m = CatBoostRegressor(); m.load_model(str(self.artifacts_dir / f)); ms.append(m)
+            self.model_sets.append((list(s["feats"]), ms))
         self.table: pd.DataFrame | None = None
         self.info: dict = {}
         self._lock = threading.Lock()
@@ -137,6 +148,8 @@ class Engine:
             raise RuntimeError(f"нет истории в {self.history_dirs}")
         h = pd.concat([pd.read_csv(f, sep=";") for f in files], ignore_index=True)
         h["date"] = pd.to_datetime(h["date"])
+        if self.until is not None:
+            h = h[h.date <= self.until]
         h = h.groupby(["route", "date", "hour"], as_index=False).boardings.sum()
         days = pd.date_range(h.date.min(), h.date.max())
         g = pd.MultiIndex.from_product([self.routes_all, days, range(24)], names=["route", "date", "hour"]).to_frame(index=False)
@@ -145,6 +158,27 @@ class Engine:
         return g[g.route.isin(self.config["routes_model"])].reset_index(drop=True)
 
     # ---------------------------------------------------------------- множители месяцев
+    @staticmethod
+    def route_beta(tr: pd.DataFrame, rid: pd.DataFrame, base: pd.Period) -> dict:
+        """Чувствительность маршрута к сезонности города: log(месяц маршрута / базовый) ≈ β·log(то же по городу),
+        по полным месяцам истории (≥ 20 дней). Маршрут без двух таких месяцев — без поправки (β = 1)."""
+        s = pd.Series(rid.pax.values / [_cal.monthrange(y, m)[1] for y, m in zip(rid.year, rid.month)],
+                      index=pd.PeriodIndex([f"{y}-{m:02d}" for y, m in zip(rid.year, rid.month)], freq="M"))
+        d = tr.assign(per=tr.date.dt.to_period("M")).groupby(["route", "per"]).agg(s=("boardings", "sum"), n=("date", "nunique")).reset_index()
+        d = d[d.n >= 20]; d["pd"] = d.s / d.n
+        out = {}
+        for r, g in d.groupby("route"):
+            g = g.set_index("per")
+            if base not in g.index or base not in s.index:
+                continue
+            ps = [x for x in g.index if x != base and x in s.index]
+            if len(ps) < 2:
+                continue
+            y = np.log(g.loc[ps, "pd"] / g.loc[base, "pd"]).values
+            x = np.log(np.array([s[q] / s[base] for q in ps]))
+            out[int(r)] = float((x * y).sum() / (x * x).sum())
+        return out
+
     @staticmethod
     def month_multipliers(rid: pd.DataFrame, origin: pd.Period, horizon: int) -> dict:
         s = pd.Series(rid.pax.values / [_cal.monthrange(y, m)[1] for y, m in zip(rid.year, rid.month)],
@@ -182,9 +216,11 @@ class Engine:
         base = min(pd.Period(last_full, "M"), pd.Period(f"{int(rid.year.iloc[-1])}-{int(rid.month.iloc[-1]):02d}", "M"))
         mult = self.month_multipliers(rid, base, (origin + HORIZON_MONTHS - base).n)
         tr, flags = clean_history(hist, cal)
+        lam = float(p.get("route_season_lambda", 0.0))
+        beta = self.route_beta(tr, rid, base)
         L = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(days=p["lvl"])].groupby("route").boardings.sum() / p["lvl"]
         pt = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(weeks=p["weeks"])].merge(cal.features(tr.date), on="date")
-        PR = pt[pt.hol_wd == 0].groupby(["route", "dow", "hour"]).boardings.mean().rename("p").reset_index()
+        PR = pt[pt.hol_wd == 0].groupby(["route", "dow", "hour"]).boardings.agg(p.get("prof_agg", "mean")).rename("p").reset_index()
         # формы дня по месяцам истории (для годовой части)
         th = tr.copy(); th["dt"] = cal.daytype(th.date); th["ym"] = th.date.dt.to_period("M")
         tot = th.groupby(["route", "date"]).boardings.transform("sum"); th["sh"] = th.boardings / tot.replace(0, np.nan)
@@ -202,8 +238,13 @@ class Engine:
 
         def pred(frb: pd.DataFrame) -> np.ndarray:
             f = frb.date.dt.to_period("M").map(mult).values.astype(float)
-            X = frb[FEATS].copy(); X["route"] = X.route.astype(int)
-            cb = np.mean([np.clip(m.predict(X), 0, None) for m in self.models], axis=0) * frb.route.map(L).values * f
+            # сезонность маршрута: городской множитель → f^(1 + λ(β − 1))
+            f = f * f ** (lam * (frb.route.map(beta).fillna(1.0).values - 1))
+            shapes = []
+            for fs, ms in self.model_sets:
+                X = frb[fs].copy(); X["route"] = X.route.astype(int)
+                shapes.append(np.mean([np.clip(m.predict(X), 0, None) for m in ms], axis=0))
+            cb = np.mean(shapes, axis=0) * frb.route.map(L).values * f
             pf = frb.merge(PR, on=["route", "dow", "hour"], how="left").p.fillna(0).values * f
             w = np.where(frb.dow.values >= 5, 0.8, 0.6)
             return np.where(frb.hol_wd.values == 1, cb, w * cb + (1 - w) * pf)
@@ -234,7 +275,9 @@ class Engine:
             Fb.loc[ok, "prediction"] = (day * mix / norm)[ok]
 
         # поправка на сильный дождь по прогнозу погоды (только ближайшие дни, где прогноз есть; сухие дни не меняются)
-        if WEATHER_MODE == "demo":
+        if not self.weather:
+            rain_slots, rain_status = {}, {"mode": "off", "note": "поправка на погоду выключена"}
+        elif WEATHER_MODE == "demo":
             demo_end = min(h_start + dt.timedelta(days=15), h_end)
             rain_slots, rain_status = sources.fetch_rain_archive(h_start, demo_end, timeout=20 if self.fetch else 0.001)
             rain_status["mode"] = "demo"
@@ -264,6 +307,7 @@ class Engine:
             "horizon": {"start": str(h_start), "end": str(h_end)},
             "month_multipliers": {str(k): round(v, 4) for k, v in mult.items() if k >= pd.Period(h_start, "M")},
             "multiplier_base_month": str(base),
+            "route_beta": {str(k): round(v, 3) for k, v in beta.items()}, "route_season_lambda": lam,
             "year_shape_months": blended_months,
             "year_shape_alpha": SHAPE_ALPHA,
             "cleaned_route_days": int(flags.m.sum()),

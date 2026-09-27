@@ -1,5 +1,5 @@
 {
- "model_version": "v7 (CatBoost x5 + профиль + сезонный множитель; лидерборд 0.88399) + годовая форма дня",
+ "model_version": "Итоговая модель (CatBoost x10: форма дня + длина светового дня; профиль; сезонность маршрута; лидерборд 0.88960) + годовая форма дня",
  "trained_on_until": "2025-10-31",
  "trained_on_rows": 65664,
  "cleaned_route_days": 168,
@@ -26,16 +26,49 @@
   28,
   50
  ],
- "models": [
-  "catboost_seed0.cbm",
-  "catboost_seed1.cbm",
-  "catboost_seed2.cbm",
-  "catboost_seed3.cbm",
-  "catboost_seed4.cbm"
+ "model_sets": [
+  {
+   "feats": [
+    "route",
+    "hour",
+    "dow",
+    "off",
+    "hol_wd",
+    "pre",
+    "post"
+   ],
+   "models": [
+    "catboost_seed0.cbm",
+    "catboost_seed1.cbm",
+    "catboost_seed2.cbm",
+    "catboost_seed3.cbm",
+    "catboost_seed4.cbm"
+   ]
+  },
+  {
+   "feats": [
+    "route",
+    "hour",
+    "dow",
+    "off",
+    "hol_wd",
+    "pre",
+    "post",
+    "daylen"
+   ],
+   "models": [
+    "catboost_daylen_seed0.cbm",
+    "catboost_daylen_seed1.cbm",
+    "catboost_daylen_seed2.cbm",
+    "catboost_daylen_seed3.cbm",
+    "catboost_daylen_seed4.cbm"
+   ]
+  }
  ],
  "params": {
   "lvl": 56,
-  "weeks": 2,
+  "weeks": 4,
+  "prof_agg": "median",
   "norm_win": 42,
   "iters": 800,
   "depth": 8,
@@ -44,6 +77,7 @@
   "rs": 0.891186687006605,
   "ss": 0.5911635469627102,
   "loss": "RMSE",
-  "boot": "Bernoulli"
+  "boot": "Bernoulli",
+  "route_season_lambda": 0.5
  }
 }

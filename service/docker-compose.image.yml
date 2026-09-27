@@ -1,7 +1,7 @@
 # Запуск из готового образа (без сборки):
-#   docker load -i tram-forecast-api_v7-engine_<arch>.tar.gz      # amd64 — обычные серверы, arm64 — Mac на Apple Silicon
+#   docker load -i tram-forecast-api_<arch>.tar.gz      # amd64 — обычные серверы, arm64 — Mac на Apple Silicon
 #   docker compose -f docker-compose.yml -f docker-compose.image.yml up -d
 services:
   api:
-    image: ${TRAM_IMAGE:-tram-forecast-api:v7-engine-amd64}
+    image: ${TRAM_IMAGE:-tram-forecast-api:amd64}
     build: !reset null

@@ -1,5 +1,5 @@
 .git
-v7/output
+model/output
 **/__pycache__
 experiments
 *.md

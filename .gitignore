@@ -1,9 +1,11 @@
-v7/output/*
-!v7/output/.gitkeep
-v7/data/grid.parquet
+model/output/*
+!model/output/.gitkeep
+model/data/grid.parquet
 __pycache__/
 *.pyc
 .venv/
 .claude/
 service/api/.venv/
 catboost_info/
+service/web/node_modules/
+service/web/dist/
