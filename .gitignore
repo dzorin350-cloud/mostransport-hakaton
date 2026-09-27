@@ -9,3 +9,4 @@ service/api/.venv/
 catboost_info/
 service/web/node_modules/
 service/web/dist/
+/service/api/loadtest_report/*

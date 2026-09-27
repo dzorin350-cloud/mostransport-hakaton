@@ -280,8 +280,9 @@ API: `/stops` (GeoJSON), `/forecast/stops`.
 счётной части p95 доходит до ≈ 1,4 с (посекундный p95 до 1 373 мс, макс. 3,2 с).
 Требование p95 в эти секунды не выполняется; план — понизить приоритет и число потоков фонового пересчёта.
 
-Сырые результаты: `service/api/loadtest_report/steps_4cpu_main_0d8036a/` (CSV Locust на каждую ступень, `res_*.txt` — CPU и память
-по `docker stats`, `SUMMARY.txt`). Повтор (из корня репозитория, сервис запущен):
+Сырые результаты предыдущего прогона: [`reports/archive/loadtest_legacy_20260927.zip`](../reports/archive/loadtest_legacy_20260927.zip)
+(внутри `steps_4cpu_main_0d8036a/`: CSV Locust на каждую ступень, `res_*.txt` — CPU и память по `docker stats`, `SUMMARY.txt`).
+Результаты итоговой модели без архива — [`steps_4cpu_final_C1/`](../service/api/loadtest_report/steps_4cpu_final_C1/). Повтор (из корня репозитория, сервис запущен):
 ```bash
 OUT=service/api/loadtest_report/steps_run1 bash service/api/loadtest_steps.sh
 python3 service/api/loadtest_steps_report.py service/api/loadtest_report/steps_run1
@@ -307,9 +308,9 @@ Windows, AMD Ryzen 5 7530U, Docker Desktop и Locust на том же компь
 
 Бутылочное горло было в повторном расчёте плана, алертов, остановок и особенно XLSX.
 Ответы кэшируются **по версии прогноза и параметрам**, поэтому после публикации
-новой версии старые значения не используются. Файлы Locust —
-`service/api/loadtest_report/dispatcher_*`. Длинный прогон —
-`dispatcher_final_4cpu_210u_10m_*`: ≈ 236 тыс. запросов, 0 ошибок, p99 150 мс.
+новой версии старые значения не используются. Исторические файлы Locust —
+в [`архиве`](../reports/archive/loadtest_legacy_20260927.zip); длинный прогон
+`dispatcher_final_4cpu_210u_10m_*` оставлен без архива: ≈ 236 тыс. запросов, 0 ошибок, p99 150 мс.
 Профиль часто экспортирует XLSX, поэтому результат консервативен для обычного
 рабочего дня. Сценарий одновременной загрузки фактов под нагрузкой ещё не
 запускался; его нельзя выводить из этих цифр.
@@ -378,10 +379,10 @@ POST `/ingest/hourly` ответил за 95 мс; `/ready` впервые по�
 картину: p95 во время пересчёта 1 702 и 1 434 мс, 0 ошибок,
 публикация через 12 и 7 с, восстановление через 4,93 и 4,79 с.
 
-Доказательства: [`service/api/loadtest_report/ingest_proof_20260927_pg/`](../service/api/loadtest_report/ingest_proof_20260927_pg/)
-содержит `summary.json`, каждый запрос с задержкой и временем завершения
+Доказательства: [`reports/archive/loadtest_legacy_20260927.zip`](../reports/archive/loadtest_legacy_20260927.zip)
+(внутри `ingest_proof_20260927_pg/`) содержит `summary.json`, каждый запрос с задержкой и временем завершения
 (`requests.csv`), посекундные CPU/RAM/swap и `/ready` (`resources.csv`),
-исходные CSV и лог Locust. Папки `_1` и `_2` — предварительные прогоны до PostgreSQL.
+исходные CSV и лог Locust. Папки `_1` и `_2` в том же архиве — предварительные прогоны до PostgreSQL.
 В суммарном CSV Locust p95 низкий, **но это скрывает краткое нарушение SLO во время пересчёта**;
 сравнение фаз выполнено по `requests.csv`. Повторение:
 
@@ -397,7 +398,7 @@ Docker volumes. **Вывод:** при стабильном прогнозе ц�
 но при совместном пересчёте — нет. Следующий шаг: ограничить CPU фонового
 движка или вынести его из API-контейнера, затем повторить тест на 2 и 4 vCPU.
 
-Locust 2.46.6, сценарий `service/api/loadtest.py` (почасовой прогноз 1 маршрут/1 день — вес 5; суточный на весь горизонт — 3; с коэффициентом — 2; health — 1), 30 с на прогон. Стенд: MacBook Air (Apple M5), Docker Desktop, Locust на той же машине. Ошибок нет ни в одном прогоне. CSV Locust — `service/api/loadtest_report/`.
+Locust 2.46.6, сценарий `service/api/loadtest.py` (почасовой прогноз 1 маршрут/1 день — вес 5; суточный на весь горизонт — 3; с коэффициентом — 2; health — 1), 30 с на прогон. Стенд: MacBook Air (Apple M5), Docker Desktop, Locust на той же машине. Ошибок нет ни в одном прогоне. Исторические CSV Locust — в [`архиве`](../reports/archive/loadtest_legacy_20260927.zip).
 
 | Конфигурация | Бэкенд | Пользователей | RPS | p50, мс | p95, мс | p99, мс | CPU контейнера | Память |
 |---|---|---|---|---|---|---|---|---|

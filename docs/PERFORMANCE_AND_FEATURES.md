@@ -37,7 +37,7 @@
 загрузкой фактов дал p95 991 мс за всю 13-секундную фазу (100 пользователей, 0 ошибок из 26 963 запросов,
 подробности в [`TESTS.md`](TESTS.md) §5). Профиль повторяет параметры (много попаданий
 в кэш); Locust на той же машине. Сырые результаты — [`loadtest_report/steps_4cpu_final_C1/`](../service/api/loadtest_report/steps_4cpu_final_C1/) (итоговая модель)
-и [`loadtest_report/steps_4cpu_main_0d8036a/`](../service/api/loadtest_report/steps_4cpu_main_0d8036a/) (прошлый прогон),
+и [`reports/archive/loadtest_legacy_20260927.zip`](../reports/archive/loadtest_legacy_20260927.zip) (прошлый прогон внутри: `steps_4cpu_main_0d8036a/`),
 повтор — [`loadtest_steps.sh`](../service/api/loadtest_steps.sh), все прогоны — [TESTS.md](TESTS.md) §5.
 
 ## 2. Дополнительные возможности

@@ -1,4 +1,11 @@
 .git
+.venv/
+.pytest_cache/
+service/api/.venv/
+service/web/node_modules/
+service/web/dist/
+service/api/loadtest_report/
+reports/
 model/output
 **/__pycache__
 experiments

@@ -146,7 +146,7 @@ React-приложение (`web/src/`), сборка в образе `web` (ngi
 4 vCPU / 4 ГБ, PostgreSQL, смешанный профиль диспетчера: при 200–400 RPS p95 6 мс, требование p95 ≤ 300 мс выдерживается
 до ≈ 1 100–1 250 RPS, потолок ≈ 1 100–1 320 RPS (два прогона, разница — нагрев ноутбука), 0 ошибок. Во время пересчёта прогноза p95 на 4–5 с поднимается до ≈ 1,4 с.
 Подробно — [`../docs/PERFORMANCE_AND_FEATURES.md`](../docs/PERFORMANCE_AND_FEATURES.md), все прогоны — [`../docs/TESTS.md`](../docs/TESTS.md) §5.
-Повтор ступенчатого теста — `api/loadtest_steps.sh`; отчёты Locust — `api/loadtest_report/`.
+Повтор ступенчатого теста — `api/loadtest_steps.sh`; итоговые отчёты Locust — `api/loadtest_report/`, исторические — в [`../reports/archive/`](../reports/archive/README.md).
 Отдельный тест приёма фактов во время нагрузки и восстановления после сбоя — `api/ingest_load_proof.py`; методика и результаты — [`../docs/TESTS.md`](../docs/TESTS.md) §5.
 
 ## Файлы
@@ -167,7 +167,7 @@ service/
 │   ├── runner.py             запуск движка и воркеров, контроль процессов
 │   ├── tests/                тесты API
 │   ├── loadtest*.py, loadtest_steps.sh   нагрузочные тесты (Locust)
-│   └── loadtest_report/      отчёты нагрузочных тестов
+│   └── loadtest_report/      итоговые доказательства нагрузочных тестов
 ├── web/                      интерфейс (React + MapLibre + Chart.js)
 └── data/routes.geojson       геометрия маршрутов (OpenStreetMap)
 ```
