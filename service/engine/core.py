@@ -117,10 +117,13 @@ def clean_history(tr: pd.DataFrame, cal: Calendar, thr=1.5, wk_thr=0.15) -> tupl
 # ============================================================================ движок
 class Engine:
     def __init__(self, history_dir, artifacts_dir: Path = HERE / "artifacts",
-                 cache_dir: Path = Path("/tmp/tram_engine_cache"), fetch: bool = True):
+                 cache_dir: Path = Path("/tmp/tram_engine_cache"), fetch: bool = True, until: str | None = None,
+                 weather: bool = True):
         dirs = history_dir if isinstance(history_dir, (list, tuple)) else [history_dir]
         self.history_dirs = [Path(d) for d in dirs]
         self.artifacts_dir, self.cache_dir, self.fetch = Path(artifacts_dir), Path(cache_dir), fetch
+        self.until = pd.Timestamp(until) if until else None
+        self.weather = weather                                  # False — без поправки на дождь (архивные прогнозы для демо)     # обрезка истории: прогноз «как если бы данные были только до этой даты»
         self.config = json.loads((self.artifacts_dir / "config.json").read_text())
         self.routes_all = self.config["routes_all"]
         self.models = []
@@ -137,6 +140,8 @@ class Engine:
             raise RuntimeError(f"нет истории в {self.history_dirs}")
         h = pd.concat([pd.read_csv(f, sep=";") for f in files], ignore_index=True)
         h["date"] = pd.to_datetime(h["date"])
+        if self.until is not None:
+            h = h[h.date <= self.until]
         h = h.groupby(["route", "date", "hour"], as_index=False).boardings.sum()
         days = pd.date_range(h.date.min(), h.date.max())
         g = pd.MultiIndex.from_product([self.routes_all, days, range(24)], names=["route", "date", "hour"]).to_frame(index=False)
@@ -234,7 +239,9 @@ class Engine:
             Fb.loc[ok, "prediction"] = (day * mix / norm)[ok]
 
         # поправка на сильный дождь по прогнозу погоды (только ближайшие дни, где прогноз есть; сухие дни не меняются)
-        if WEATHER_MODE == "demo":
+        if not self.weather:
+            rain_slots, rain_status = {}, {"mode": "off", "note": "поправка на погоду выключена"}
+        elif WEATHER_MODE == "demo":
             demo_end = min(h_start + dt.timedelta(days=15), h_end)
             rain_slots, rain_status = sources.fetch_rain_archive(h_start, demo_end, timeout=20 if self.fetch else 0.001)
             rain_status["mode"] = "demo"

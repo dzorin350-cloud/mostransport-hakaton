@@ -406,7 +406,7 @@ export function App() {
         if (hourChartRef.current) hourChartRef.current.data.datasets[1].data = dates.map((d) => byDateHi[d]);
         if (hourChartRef.current) hourChartRef.current.data.datasets[2].data = dates.map((d) => byDate[d]);
         const peakDate = dates.reduce((a, b) => byDate[a] > byDate[b] ? a : b, dates[0]);
-        peak = peakDate ? fmtDateShort(peakDate) : "—";
+        peak = peakDate ? fmtDate(peakDate) : "—";
       }
       hourChartRef.current?.update();
       recolorRoutes(byRoute);
@@ -508,7 +508,7 @@ export function App() {
   };
 
   const total = lastData ? fmtNum(lastData.total_prediction) : "—";
-  const peak = notices.find((n) => n.title === "Пиковая нагрузка")?.text.replace("Пик текущего периода: ", "").replace(".", "") || "—";
+  const peak = notices.find((n) => n.title === "Пиковая нагрузка")?.text.replace("Пик текущего периода: ", "").replace(/\.$/, "") || "—";
   const applyScenario = useCallback((nextCoef, label = "Ручной сценарий") => {
     setCoef(nextCoef);
     toast("Сценарий применён", `${label}: коэффициент ×${nextCoef.toFixed(2)}`, "info");
