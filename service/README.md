@@ -5,6 +5,31 @@ Backend + frontend поверх итоговой ML-модели (WAPE-score 0,8
 и диспетчерские функции, интерфейс — рабочее место диспетчера. Инструкция для жюри — [`../docs/JURY.md`](../docs/JURY.md),
 архитектура — [`../ARCHITECTURE.md`](../ARCHITECTURE.md), устройство движка — [`engine/README.md`](engine/README.md).
 
+## ML-модель: артефакты, код обучения и инференса
+
+**Итоговая модель — WAPE-score 0,88399 на лидерборде.** Прогноз = уровень маршрута (посадки в сутки за 56 дней) ×
+форма дня (5 моделей CatBoost в смеси с профилем последних двух недель) × сезонный множитель месяца (data.mos.ru);
+обучение на истории, очищенной от перекрытий и сбоев. Подробно — [`../docs/MODEL.md`](../docs/MODEL.md), [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §2.
+
+| Что | Где |
+|---|---|
+| **Артефакты модели** | [`engine/artifacts/`](engine/artifacts/) — 5 моделей CatBoost `catboost_seed0…4.cbm`, `config.json` (параметры, дата обучения), нормы вагонов, коэффициенты коридора, остановки |
+| **Код обучения** | [`../model/code/`](../model/code/) — сетка из `labels/`, очистка, признаки, CatBoost, профиль, сезонность, гиперпараметры Optuna; [`engine/train.py`](engine/train.py) — обучение моделей для сервиса |
+| **Код инференса** | [`engine/core.py`](engine/core.py) — применение модели к истории; [`engine/sources.py`](engine/sources.py) — внешние данные; [`engine/refresher.py`](engine/refresher.py) — пересчёт и публикация; пакетный прогноз без сервиса — [`../model/code/forecast.py`](../model/code/forecast.py) |
+| **Отправленный сабмит** | [`../model/submission.csv`](../model/submission.csv) и md5 |
+
+```bash
+# воспроизвести сабмит байт в байт (из корня репозитория)
+cd model/code && python build_grid.py && python final.py && md5sum ../output/submission.csv   # = model/submission.md5
+# прогноз на любой период до 12 месяцев
+python forecast.py --start 2025-11-01 --end 2026-10-31 --out ../output/forecast.csv
+# то же в Docker (из корня): docker build -t tram-model . && docker run --rm tram-model
+# переобучить модели сервиса (из корня): python -m service.engine.train, затем docker compose up -d --build
+```
+
+Проверка: бэктест сен–окт 0,8615; реальный октябрь в сервисе — 0,9038 с еженедельными обновлениями; сервис против
+сабмита на ноябре–декабре — расхождение 0,0023 %.
+
 ## Быстрый старт
 
 ```bash
