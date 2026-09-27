@@ -15,6 +15,11 @@ def cal(dates):
     prv=c.date.map(lambda d:int((d-pd.Timedelta(days=1)) in DAYOFF or (d-pd.Timedelta(days=1)).dayofweek>=5))
     c['pre']=((nxt==1)&(c.off==0)).astype(int); c['post']=((prv==1)&(c.off==0)).astype(int)
     c['dom']=c.date.dt.day
+    # длина светового дня в Москве (55.75° с. ш.), ч — астрономия, известна заранее
+    doy=c.date.dt.dayofyear.values; lat=np.radians(55.75)
+    decl=np.radians(23.44)*np.sin(2*np.pi*(284+doy)/365)
+    ha=np.degrees(np.arccos(np.clip(-np.tan(lat)*np.tan(decl),-1,1)))
+    c['daylen']=2*ha/15
     return c
 def wape(y,p): return np.abs(y-p).sum()/y.sum()
 FEATS=['route','hour','dow','off','hol_wd','pre','post']

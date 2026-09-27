@@ -4,8 +4,8 @@
   1. читает историю (почасовые посадки маршрут × дата × час) и определяет дату последних данных;
   2. сам скачивает внешние данные (sources.py): производственный календарь и месячный пассажиропоток трамвая;
   3. очищает историю от аномалий (перекрытия, объединения маршрутов, сбои) — как в итоговой модели;
-  4. считает уровень маршрута (последние 56 дней) и профиль (последние 2 недели);
-  5. загружает 5 обученных моделей CatBoost (обучаются офлайн, train.py) и строит почасовой прогноз
+  4. считает уровень маршрута (последние 56 дней) и профиль (последние 4 недели, медиана);
+  5. загружает 10 обученных моделей CatBoost (два набора признаков: базовый и с длиной светового дня; train.py) и строит почасовой прогноз
      на 12 месяцев вперёд от даты данных:
        прогноз = уровень × форма дня (CatBoost + профиль) × сезонный множитель месяца;
      годовая часть: для месяцев, у которых в истории есть тот же месяц год назад, форма дня
@@ -66,7 +66,7 @@ class Calendar:
         return [d for d in pd.date_range(d0, d1).date if d.weekday() >= 5 and not self.is_off(d)]
 
     def features(self, dates) -> pd.DataFrame:
-        """Признаки дня, как в итоговой модели: dow, off, hol_wd, pre, post."""
+        """Признаки дня, как в итоговой модели: dow, off, hol_wd, pre, post, daylen (длина светового дня)."""
         ds = pd.to_datetime(pd.Series(pd.unique(pd.Series(dates))))
         c = pd.DataFrame({"date": ds})
         c["dow"] = c.date.dt.dayofweek
@@ -77,6 +77,9 @@ class Calendar:
         prv = [int(self.is_off(x - dt.timedelta(1)) or (x - dt.timedelta(1)).weekday() >= 5) for x in d]
         c["pre"] = ((np.array(nxt) == 1) & (c.off == 0)).astype(int)
         c["post"] = ((np.array(prv) == 1) & (c.off == 0)).astype(int)
+        doy = c.date.dt.dayofyear.values; lat = np.radians(55.75)          # Москва, 55.75° с. ш.
+        decl = np.radians(23.44) * np.sin(2 * np.pi * (284 + doy) / 365)
+        c["daylen"] = 2 * np.degrees(np.arccos(np.clip(-np.tan(lat) * np.tan(decl), -1, 1))) / 15
         return c
 
     def daytype(self, dates: pd.Series) -> np.ndarray:
@@ -122,13 +125,18 @@ class Engine:
         dirs = history_dir if isinstance(history_dir, (list, tuple)) else [history_dir]
         self.history_dirs = [Path(d) for d in dirs]
         self.artifacts_dir, self.cache_dir, self.fetch = Path(artifacts_dir), Path(cache_dir), fetch
-        self.until = pd.Timestamp(until) if until else None
-        self.weather = weather                                  # False — без поправки на дождь (архивные прогнозы для демо)     # обрезка истории: прогноз «как если бы данные были только до этой даты»
+        self.until = pd.Timestamp(until) if until else None     # обрезка истории: прогноз «как если бы данные были только до этой даты»
+        self.weather = weather                                  # False — без поправки на дождь (архивные прогнозы для демо)
         self.config = json.loads((self.artifacts_dir / "config.json").read_text())
         self.routes_all = self.config["routes_all"]
-        self.models = []
-        for f in self.config["models"]:
-            m = CatBoostRegressor(); m.load_model(str(self.artifacts_dir / f)); self.models.append(m)
+        # наборы моделей формы дня: у каждого свой список признаков; прогноз — среднее по моделям набора, затем по наборам
+        sets = self.config.get("model_sets") or [{"feats": FEATS, "models": self.config["models"]}]
+        self.model_sets = []
+        for s in sets:
+            ms = []
+            for f in s["models"]:
+                m = CatBoostRegressor(); m.load_model(str(self.artifacts_dir / f)); ms.append(m)
+            self.model_sets.append((list(s["feats"]), ms))
         self.table: pd.DataFrame | None = None
         self.info: dict = {}
         self._lock = threading.Lock()
@@ -189,7 +197,7 @@ class Engine:
         tr, flags = clean_history(hist, cal)
         L = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(days=p["lvl"])].groupby("route").boardings.sum() / p["lvl"]
         pt = tr[tr.date > pd.Timestamp(data_until) - pd.Timedelta(weeks=p["weeks"])].merge(cal.features(tr.date), on="date")
-        PR = pt[pt.hol_wd == 0].groupby(["route", "dow", "hour"]).boardings.mean().rename("p").reset_index()
+        PR = pt[pt.hol_wd == 0].groupby(["route", "dow", "hour"]).boardings.agg(p.get("prof_agg", "mean")).rename("p").reset_index()
         # формы дня по месяцам истории (для годовой части)
         th = tr.copy(); th["dt"] = cal.daytype(th.date); th["ym"] = th.date.dt.to_period("M")
         tot = th.groupby(["route", "date"]).boardings.transform("sum"); th["sh"] = th.boardings / tot.replace(0, np.nan)
@@ -207,8 +215,11 @@ class Engine:
 
         def pred(frb: pd.DataFrame) -> np.ndarray:
             f = frb.date.dt.to_period("M").map(mult).values.astype(float)
-            X = frb[FEATS].copy(); X["route"] = X.route.astype(int)
-            cb = np.mean([np.clip(m.predict(X), 0, None) for m in self.models], axis=0) * frb.route.map(L).values * f
+            shapes = []
+            for fs, ms in self.model_sets:
+                X = frb[fs].copy(); X["route"] = X.route.astype(int)
+                shapes.append(np.mean([np.clip(m.predict(X), 0, None) for m in ms], axis=0))
+            cb = np.mean(shapes, axis=0) * frb.route.map(L).values * f
             pf = frb.merge(PR, on=["route", "dow", "hour"], how="left").p.fillna(0).values * f
             w = np.where(frb.dow.values >= 5, 0.8, 0.6)
             return np.where(frb.hol_wd.values == 1, cb, w * cb + (1 - w) * pf)

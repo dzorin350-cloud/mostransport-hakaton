@@ -5,10 +5,13 @@ print("помечено маршруто-дней:",int(dd.m.sum()),dd[dd.m].gro
 fac=seas(origin,[11,12]); days=pd.date_range('2025-11-01','2025-12-31')
 F=pd.MultiIndex.from_product([ROUTES,days,range(24)],names=['route','date','hour']).to_frame(index=False)
 L=tr[tr.date>origin-pd.Timedelta(days=best['lvl'])].groupby('route').boardings.sum()/best['lvl']
-models=[fit_cb(tr,best,s) for s in range(5)]; PR=prof(tr,best['weeks'])
+SETS=best['shape_sets']; models=[(fs,[fit_cb(tr,best,s,fs) for s in range(5)]) for fs in SETS]; PR=prof(tr,best['weeks'],best['prof_agg'])
 def pred(frb):
-    f=frb.date.dt.month.map(fac).values; X=frb[FEATS].copy(); X['route']=X.route.astype(int)
-    cb=np.mean([np.clip(m.predict(X),0,None) for m in models],axis=0)*frb.route.map(L).values*f
+    f=frb.date.dt.month.map(fac).values
+    per_set=[]
+    for fs,ms in models:                       # форма дня: среднее 5 seed внутри набора признаков, затем среднее наборов
+        X=frb[fs].copy(); X['route']=X.route.astype(int); per_set.append(np.mean([np.clip(m.predict(X),0,None) for m in ms],axis=0))
+    cb=np.mean(per_set,axis=0)*frb.route.map(L).values*f
     pf=frb.merge(PR,on=['route','dow','hour'],how='left').p.fillna(0).values*f
     w=np.where(frb.dow.values>=5,0.8,0.6); return np.where(frb.hol_wd.values==1,cb,w*cb+(1-w)*pf)
 Fb=build(F); Fb['prediction']=pred(Fb)
