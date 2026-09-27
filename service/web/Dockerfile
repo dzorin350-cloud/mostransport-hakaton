@@ -3,6 +3,7 @@ WORKDIR /app
 COPY service/web/package.json service/web/package-lock.json ./
 RUN npm ci
 COPY service/web/index.html ./index.html
+COPY service/web/public ./public
 COPY service/web/src ./src
 RUN npm run build
 
